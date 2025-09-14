@@ -8,12 +8,12 @@ import React, { useState, useEffect, forwardRef, InputHTMLAttributes, ButtonHTML
 import { useRouter, useParams } from 'next/navigation';
 import { auth, db } from '../../../lib/firebase';
 import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
-import { doc, onSnapshot, updateDoc, deleteDoc, arrayUnion, Timestamp, runTransaction, arrayRemove, collection, query, where, writeBatch, getDocs, addDoc, serverTimestamp, getDoc } from 'firebase/firestore';
+import { doc, onSnapshot, updateDoc, deleteDoc, arrayUnion, Timestamp, runTransaction, arrayRemove, collection, query, where, writeBatch, getDocs, addDoc, serverTimestamp, getDoc, setDoc } from 'firebase/firestore';
 import { cva, type VariantProps } from "class-variance-authority";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
-import { LoaderCircle, User as UserIcon, Users, MessageSquare, Send, Crown, Mic, MicOff, MoreVertical, UserX, Star, Volume2, Pencil, Check, X as XIcon } from 'lucide-react';
+import { LoaderCircle, User as UserIcon, Users, MessageSquare, Send, Crown, Mic, MicOff, MoreVertical, UserX, Star, Volume2, Pencil, Check, X as XIcon, UserPlus, Hourglass } from 'lucide-react';
 import { toast } from "sonner";
 
 
@@ -56,6 +56,14 @@ interface GameRoom {
     chatMessages: ChatMessage[];
     createdAt: Timestamp;
     status: 'waiting' | 'loading' | 'playing' | 'finished';
+}
+
+interface FriendRequest {
+  id: string;
+  from: { uid: string; displayName: string | null; tag: string | null; };
+  to: { uid: string; displayName: string | null; tag: string | null; };
+  status: 'pending' | 'accepted' | 'declined';
+  createdAt: Timestamp;
 }
 
 // --- UTILS & COMPONENTS ---
@@ -115,6 +123,8 @@ export default function RoomPage() {
     const [onlineFriends, setOnlineFriends] = useState<UserProfile[]>([]);
     const [isEditingName, setIsEditingName] = useState(false);
     const [newRoomName, setNewRoomName] = useState("");
+    const [incomingRequests, setIncomingRequests] = useState<FriendRequest[]>([]);
+    const [sentRequests, setSentRequests] = useState<FriendRequest[]>([]);
     
     const chatEndRef = useRef<HTMLDivElement>(null);
     const roomStateRef = useRef<GameRoom | null>(null);
@@ -513,14 +523,15 @@ useEffect(() => {
                 if (!roomDoc.exists()) throw new Error("Room does not exist.");
                 
                 const roomData = roomDoc.data() as GameRoom;
+                const playerToKick = roomData.players.find(p => p.uid === playerId);
                 const newPlayers = roomData.players.filter(p => p.uid !== playerId);
                 const newPlayerIds = roomData.playerIds.filter(id => id !== playerId);
 
                 if (newPlayers.length === roomData.players.length) return; // Player not found
                 
                 transaction.update(roomRef, { players: newPlayers, playerIds: newPlayerIds });
+                toast.success(`${playerToKick?.displayName} was kicked.`);
             });
-            toast.success("Player kicked.");
         } catch (error) {
             console.error("Error kicking player:", error);
             toast.error("Failed to kick player.");
@@ -576,6 +587,94 @@ useEffect(() => {
             toast.error("Not all players are ready."); 
         }
     };
+    
+    useEffect(() => {
+        if (!user) return;
+    
+        const sentQuery = query(collection(db, "friendRequests"), where("from.uid", "==", user.uid));
+        const incomingQuery = query(collection(db, "friendRequests"), where("to.uid", "==", user.uid));
+    
+        const unsubSent = onSnapshot(sentQuery, (snapshot) => {
+          const requests = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as FriendRequest));
+          setSentRequests(requests);
+        });
+    
+        const unsubIncoming = onSnapshot(incomingQuery, (snapshot) => {
+          const requests = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as FriendRequest));
+          setIncomingRequests(requests);
+        });
+    
+        return () => {
+          unsubSent();
+          unsubIncoming();
+        };
+    }, [user]);
+
+    const isFriend = (targetUid: string) => userProfile?.friends?.includes(targetUid);
+    const isRequestPendingWith = (targetUid: string) => {
+        return sentRequests.some(req => req.to.uid === targetUid && req.status === 'pending') || 
+               incomingRequests.some(req => req.from.uid === targetUid && req.status === 'pending');
+    };
+    
+    const handleSendFriendRequest = async (targetPlayer: Player) => {
+        if (!user || !userProfile) return;
+        if (isFriend(targetPlayer.uid) || isRequestPendingWith(targetPlayer.uid)) {
+            toast.info("You are already friends or have a pending request.");
+            return;
+        }
+    
+        const requestId = [user.uid, targetPlayer.uid].sort().join('_');
+        const requestRef = doc(db, "friendRequests", requestId);
+    
+        try {
+            await setDoc(requestRef, {
+                from: { uid: user.uid, displayName: userProfile.displayName, tag: userProfile.tag },
+                to: { uid: targetPlayer.uid, displayName: targetPlayer.displayName, tag: targetPlayer.tag },
+                status: 'pending',
+                createdAt: serverTimestamp()
+            });
+            toast.success(`Friend request sent to ${targetPlayer.displayName}`);
+        } catch (error) {
+            console.error("Error sending friend request:", error);
+            toast.error("Failed to send friend request.");
+        }
+    };
+    
+    const isHost = user?.uid === room?.host.uid;
+
+    useEffect(() => {
+        if (!isHost || !room || !user) return;
+    
+        const otherPlayerIds = room.playerIds.filter(id => id !== user.uid);
+        if (otherPlayerIds.length === 0) return;
+    
+        const q = query(collection(db, "users"), where('uid', 'in', otherPlayerIds));
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            snapshot.forEach(async (playerDoc) => {
+                const playerData = playerDoc.data() as UserProfile;
+                if (playerData.status === 'offline' && roomStateRef.current?.playerIds.includes(playerData.uid)) {
+                    const roomRef = doc(db, "rooms", roomId);
+                    await runTransaction(db, async (transaction) => {
+                        const roomDoc = await transaction.get(roomRef);
+                        if (!roomDoc.exists()) return;
+    
+                        const currentPlayers = roomDoc.data().players as Player[];
+                        const playerToRemove = currentPlayers.find(p => p.uid === playerData.uid);
+                        if (!playerToRemove) return;
+
+                        const newPlayers = currentPlayers.filter(p => p.uid !== playerData.uid);
+                        const newPlayerIds = roomDoc.data().playerIds.filter((id: string) => id !== playerData.uid);
+    
+                        transaction.update(roomRef, { players: newPlayers, playerIds: newPlayerIds });
+                        toast.info(`${playerToRemove.displayName} left (disconnected).`);
+                    }).catch(err => console.error("Failed to remove offline player:", err));
+                }
+            });
+        });
+    
+        return () => unsubscribe();
+    }, [isHost, room?.playerIds.join(','), user?.uid, roomId]);
+
 
     if (loading || !room || !user) {
         return <div className="flex items-center justify-center min-h-screen bg-zinc-900"><LoaderCircle className="h-8 w-8 animate-spin text-green-400" /></div>;
@@ -583,7 +682,6 @@ useEffect(() => {
 
     const myUid = user!.uid;
 
-    const isHost = myUid === room.host.uid;
 
     const renderPlayerSlots = () => Array.from({ length: room.maxPlayers }).map((_, i) => {
         const player = room.players[i];
@@ -593,15 +691,30 @@ useEffect(() => {
             return (
                 <div key={player.uid} className={cn('relative bg-zinc-800 rounded-lg p-3 flex flex-col items-center justify-between border-2 transition-all duration-200', player.isSpeaking && !player.isMuted ? 'border-blue-400 shadow-lg shadow-blue-400/20 animate-pulse' : player.isReady ? 'border-green-500' : 'border-zinc-700')}>
             <audio ref={localMonitorRef} autoPlay playsInline style={{ display: 'none' }} />
-                    {isHost && !isCurrentUser && (
+                    {!isCurrentUser && (
                         <div className="absolute top-1 right-1" ref={menuRef}>
                             <Button variant="ghost" size="icon" className="h-7 w-7 rounded-full hover:bg-zinc-700" onClick={() => setPlayerMenuOpen(playerMenuOpen === player.uid ? null : player.uid)}>
                                 <MoreVertical className="h-4 w-4" />
                             </Button>
                             {playerMenuOpen === player.uid && (
-                                <div className="absolute right-0 mt-2 w-40 bg-zinc-900 border border-zinc-700 rounded-md shadow-lg z-10 overflow-hidden">
-                                    <button onClick={() => { handleMakeHost(player.uid); setPlayerMenuOpen(null); }} className="w-full text-left px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800 flex items-center gap-2 transition-colors"><Star className="w-4 h-4" /> Make Host</button>
-                                    <button onClick={() => { handleKickPlayer(player.uid); setPlayerMenuOpen(null); }} className="w-full text-left px-3 py-2 text-sm text-red-400 hover:bg-zinc-800 flex items-center gap-2 transition-colors"><UserX className="w-4 h-4" /> Kick Player</button>
+                                <div className="absolute right-0 mt-2 w-48 bg-zinc-900 border border-zinc-700 rounded-md shadow-lg z-10 overflow-hidden">
+                                    {isHost && (
+                                    <>
+                                        <button onClick={() => { handleMakeHost(player.uid); setPlayerMenuOpen(null); }} className="w-full text-left px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800 flex items-center gap-2 transition-colors"><Star className="w-4 h-4" /> Make Host</button>
+                                        <button onClick={() => { handleKickPlayer(player.uid); setPlayerMenuOpen(null); }} className="w-full text-left px-3 py-2 text-sm text-red-400 hover:bg-zinc-800 flex items-center gap-2 transition-colors"><UserX className="w-4 h-4" /> Kick Player</button>
+                                    </>
+                                    )}
+                                    {!isFriend(player.uid) && !isRequestPendingWith(player.uid) && (
+                                    <button onClick={() => { handleSendFriendRequest(player); setPlayerMenuOpen(null); }} className="w-full text-left px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800 flex items-center gap-2 transition-colors">
+                                        <UserPlus className="w-4 h-4" /> Add Friend
+                                    </button>
+                                    )}
+                                    {isFriend(player.uid) && (
+                                        <div className="px-3 py-2 text-sm text-zinc-400 flex items-center gap-2"><Check className="w-4 h-4 text-green-500" /> Already Friends</div>
+                                    )}
+                                    {isRequestPendingWith(player.uid) && (
+                                        <div className="px-3 py-2 text-sm text-zinc-400 flex items-center gap-2"><Hourglass className="w-4 h-4" /> Request Pending</div>
+                                    )}
                                 </div>
                             )}
                         </div>
