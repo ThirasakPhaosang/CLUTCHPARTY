@@ -13,7 +13,7 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
-import { LoaderCircle, User as UserIcon, Users, MessageSquare, Send, Crown, Mic, MicOff, MoreVertical, UserX, Star, Volume2 } from 'lucide-react';
+import { LoaderCircle, User as UserIcon, Users, MessageSquare, Send, Crown, Mic, MicOff, MoreVertical, UserX, Star, Volume2, Pencil, Check, X as XIcon } from 'lucide-react';
 import { toast } from "sonner";
 
 
@@ -111,16 +111,24 @@ export default function RoomPage() {
     const [playerMenuOpen, setPlayerMenuOpen] = useState<string | null>(null);
     const [isInviteDialogOpen, setInviteDialogOpen] = useState(false);
     const [onlineFriends, setOnlineFriends] = useState<UserProfile[]>([]);
+    const [isEditingName, setIsEditingName] = useState(false);
+    const [newRoomName, setNewRoomName] = useState("");
     
     const chatEndRef = useRef<HTMLDivElement>(null);
     const roomStateRef = useRef<GameRoom | null>(null);
     const menuRef = useRef<HTMLDivElement>(null);
 
-    // Audio processing refs
+    // Audio processing and WebRTC refs
     const audioStreamRef = useRef<MediaStream | null>(null);
     const isSpeakingRef = useRef(false);
+    const peerConnectionsRef = useRef<{ [key: string]: RTCPeerConnection }>({});
+    const [remoteStreams, setRemoteStreams] = useState<{ [key: string]: MediaStream }>({});
 
-    useEffect(() => {
+    
+    const localMonitorRef = useRef<HTMLAudioElement | null>(null);
+    const [monitorOn, setMonitorOn] = useState<boolean>(false);
+
+useEffect(() => {
         const authUnsubscribe = onAuthStateChanged(auth, (currentUser) => {
             if (!currentUser) { router.push('/'); return; }
             setUser(currentUser);
@@ -143,13 +151,14 @@ export default function RoomPage() {
                     toast.error("You are not a member of this room."); router.push('/lobby'); return;
                 }
                 setRoom(roomData); roomStateRef.current = roomData; setLoading(false);
+                if (!isEditingName) setNewRoomName(roomData.name);
             } else {
                 toast.error("Room not found."); router.push('/lobby');
             }
         });
         return () => roomUnsubscribe();
-    }, [roomId, user, router]);
-
+    }, [roomId, user, router, isEditingName]);
+    
     useEffect(() => {
         if (!user?.uid || !roomId) return;
         let animationFrameId: number; let localStream: MediaStream; let audioContext: AudioContext; let analyser: AnalyserNode; let source: MediaStreamAudioSourceNode; let dataArray: Uint8Array<ArrayBuffer>;
@@ -168,42 +177,42 @@ export default function RoomPage() {
                 localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
                 audioStreamRef.current = localStream;
                 const currentPlayer = roomStateRef.current?.players.find(p => p.uid === user.uid);
+                // Mic monitor (optional)
+                if (monitorOn && localMonitorRef.current) {
+                    const a = localMonitorRef.current;
+                    a.srcObject = localStream;
+                    a.muted = false;
+                    a.volume = 1.0;
+                    a.play().catch(() => {});
+                }
+
                 localStream.getAudioTracks().forEach(track => { track.enabled = !!currentPlayer && !currentPlayer.isMuted; });
                 
-                // Create audio context with fallback
-                const AudioCtx = window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-                if (!AudioCtx) {
-                    throw new Error("AudioContext not supported");
-                }
+                interface AudioContextWindow extends Window { webkitAudioContext?: typeof AudioContext }
+                const StdAudioContext: typeof AudioContext | undefined = (window as Window & typeof globalThis).AudioContext;
+                const WebkitAudioContext = (window as unknown as AudioContextWindow).webkitAudioContext;
+                const AudioCtx = StdAudioContext ?? WebkitAudioContext;
+                if (!AudioCtx) throw new Error("AudioContext not supported");
                 
                 audioContext = new AudioCtx();
                 analyser = audioContext.createAnalyser();
-                analyser.fftSize = 1024; // Set smaller FFT size for better performance
+                analyser.fftSize = 512;
                 analyser.minDecibels = -90;
                 analyser.maxDecibels = -10;
                 analyser.smoothingTimeConstant = 0.85;
 
                 source = audioContext.createMediaStreamSource(localStream);
                 source.connect(analyser);
-                
-                // Create the data array with the correct size
                 dataArray = new Uint8Array(analyser.frequencyBinCount) as Uint8Array<ArrayBuffer>;
 
                 const detectSpeaking = () => {
-                    try {
-                        if (analyser && dataArray) {
-                            analyser.getByteFrequencyData(dataArray as Uint8Array<ArrayBuffer>);
-                            const values = dataArray.reduce((sum, value) => sum + value, 0);
-                            const average = values / dataArray.length;
-                            const speaking = average > 15; // Adjusted threshold
+                    analyser.getByteFrequencyData(dataArray as Uint8Array<ArrayBuffer>);
+                    const average = dataArray.reduce((sum, value) => sum + value, 0) / dataArray.length;
+                    const speaking = average > 10; // Speaking threshold
 
-                            if (speaking !== isSpeakingRef.current) {
-                                isSpeakingRef.current = speaking;
-                                updateSpeakingStatus(speaking);
-                            }
-                        }
-                    } catch (err) {
-                        console.error("Audio analysis error:", err);
+                    if (speaking !== isSpeakingRef.current) {
+                        isSpeakingRef.current = speaking;
+                        updateSpeakingStatus(speaking);
                     }
                     animationFrameId = requestAnimationFrame(detectSpeaking);
                 };
@@ -216,11 +225,105 @@ export default function RoomPage() {
         };
         setupMic();
         return () => { cancelAnimationFrame(animationFrameId); localStream?.getTracks().forEach(track => track.stop()); audioContext?.close().catch(() => {}); };
-    }, [user, user?.uid, roomId]);
+    }, [user?.uid, roomId, monitorOn]);
 
+    // WebRTC connection management
+    useEffect(() => {
+        if (!user || !roomId || !audioStreamRef.current || !room?.players) return;
+
+        const myId = user.uid;
+        const roomRef = doc(db, "rooms", roomId);
+        const signalingCollection = collection(roomRef, 'signaling');
+        const pcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+    
+        const createPeerConnection = (peerId: string, initiator: boolean) => {
+            if (peerConnectionsRef.current[peerId]) return peerConnectionsRef.current[peerId];
+    
+            const pc = new RTCPeerConnection(pcConfig);
+            peerConnectionsRef.current[peerId] = pc;
+    
+            audioStreamRef.current?.getTracks().forEach(track => pc.addTrack(track, audioStreamRef.current!));
+    
+            pc.ontrack = (event) => setRemoteStreams(prev => ({ ...prev, [peerId]: event.streams[0] }));
+    
+            pc.onicecandidate = event => {
+                if (event.candidate) {
+                    addDoc(signalingCollection, { from: myId, to: peerId, signal: { type: 'candidate', candidate: event.candidate.toJSON() } });
+                }
+            };
+    
+            if (initiator) {
+                pc.onnegotiationneeded = async () => {
+                    try {
+                        const offer = await pc.createOffer();
+                        await pc.setLocalDescription(offer);
+                        await addDoc(signalingCollection, { from: myId, to: peerId, signal: { type: 'offer', sdp: pc.localDescription?.sdp } });
+                    } catch (err) { console.error("Create offer error:", err); }
+                };
+            }
+            return pc;
+        };
+    
+        const playerIds = room.playerIds.filter(id => id !== myId);
+    
+        // Initiate connections to other players
+        playerIds.forEach(peerId => createPeerConnection(peerId, true));
+    
+        // Listen for signaling messages
+        const q = query(signalingCollection, where("to", "==", myId));
+        const signalingUnsubscribe = onSnapshot(q, async (snapshot) => {
+            for (const change of snapshot.docChanges()) {
+                if (change.type === "added") {
+                    const { from: fromId, signal } = change.doc.data();
+                    const pc = createPeerConnection(fromId, false);
+    
+                    if (signal.type === 'offer' && pc.signalingState !== 'stable') {
+                        try {
+                            await pc.setRemoteDescription({ type: 'offer', sdp: signal.sdp });
+                            const answer = await pc.createAnswer();
+                            await pc.setLocalDescription(answer);
+                            await addDoc(signalingCollection, { from: myId, to: fromId, signal: { type: 'answer', sdp: pc.localDescription?.sdp } });
+                        } catch (err) { console.error('Error handling offer:', err); }
+                    } else if (signal.type === 'answer') {
+                        try {
+                            await pc.setRemoteDescription({ type: 'answer', sdp: signal.sdp });
+                        } catch (err) { console.error('Error handling answer:', err); }
+                    } else if (signal.candidate) {
+                        try {
+                           if (pc.remoteDescription) await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
+                        } catch (err) { console.error('Error adding ICE candidate:', err); }
+                    }
+                    await deleteDoc(change.doc.ref); // Clean up signal
+                }
+            }
+        });
+    
+        // Cleanup on component unmount or dependencies change
+        return () => {
+            signalingUnsubscribe();
+            Object.values(peerConnectionsRef.current).forEach(pc => pc.close());
+            peerConnectionsRef.current = {};
+        };
+    }, [roomId, user, room?.playerIds.join(','), audioStreamRef.current]);
+    
     useEffect(() => {
         chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [room?.chatMessages]);
+
+    // Respond to monitor toggle
+    useEffect(() => {
+        const a = localMonitorRef.current;
+        if (!a) return;
+        if (monitorOn && audioStreamRef.current) {
+            a.srcObject = audioStreamRef.current;
+            a.muted = false;
+            a.volume = 1.0;
+            a.play().catch(() => {});
+        } else {
+            a.pause();
+            a.srcObject = null
+        }
+    }, [monitorOn, audioStreamRef.current]);
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -243,27 +346,47 @@ export default function RoomPage() {
         return () => unsubscribe();
     }, [userProfile, room?.playerIds]);
 
-    const handleLeaveRoom = async () => {
-        if (!user || !room) return;
+    const performLeaveRoom = async () => {
+        if (!user || !roomId) return;
         const roomRef = doc(db, "rooms", roomId);
         try {
-            if (room.players.length <= 1) { await deleteDoc(roomRef); }
-            else {
-                await runTransaction(db, async (transaction) => {
-                    const freshRoomDoc = await transaction.get(roomRef);
-                    if(!freshRoomDoc.exists()) return;
-                    const freshRoomData = freshRoomDoc.data() as GameRoom;
-                    const playerToRemove = freshRoomData.players.find(p => p.uid === user.uid);
-                    let newHost = freshRoomData.host;
-                    if (user.uid === freshRoomData.host.uid) {
-                        const nextPlayer = freshRoomData.players.find(p => p.uid !== user.uid);
-                        if(nextPlayer) newHost = { uid: nextPlayer.uid, displayName: nextPlayer.displayName };
-                    }
-                    transaction.update(roomRef, { players: arrayRemove(playerToRemove), playerIds: arrayRemove(user.uid), host: newHost });
-                });
-            } router.push('/lobby');
-        } catch (error) { console.error("Error leaving room: ", error); }
+            await runTransaction(db, async (transaction) => {
+                const roomDoc = await transaction.get(roomRef);
+                if (!roomDoc.exists()) return;
+
+                const roomData = roomDoc.data() as GameRoom;
+                
+                if (roomData.players.length <= 1) {
+                    transaction.delete(roomRef);
+                    return;
+                }
+
+                const newPlayers = roomData.players.filter(p => p.uid !== user.uid);
+                const newPlayerIds = roomData.playerIds.filter(id => id !== user.uid);
+                let newHost = roomData.host;
+
+                if (user.uid === roomData.host.uid && newPlayers.length > 0) {
+                    const nextPlayer = newPlayers[0];
+                    if (nextPlayer) newHost = { uid: nextPlayer.uid, displayName: nextPlayer.displayName };
+                }
+                transaction.update(roomRef, { players: newPlayers, playerIds: newPlayerIds, host: newHost });
+            });
+        } catch (error) { 
+            console.error("Error performing leave room operation: ", error); 
+        }
     };
+    
+    const handleLeaveRoom = async () => {
+        await performLeaveRoom();
+        router.push('/lobby');
+    };
+
+    useEffect(() => {
+        const onBeforeUnload = () => { performLeaveRoom(); };
+        window.addEventListener('beforeunload', onBeforeUnload);
+        return () => window.removeEventListener('beforeunload', onBeforeUnload);
+    }, [user, roomId]); // Re-bind if user or room changes
+
     
     const handleToggleReady = async () => {
         if (!user || !room) return;
@@ -285,6 +408,7 @@ export default function RoomPage() {
             if (audioStreamRef.current) {
                 audioStreamRef.current.getAudioTracks().forEach(track => { track.enabled = !newMutedState; });
             }
+            const a = localMonitorRef.current; if (a) { a.muted = newMutedState; if (!newMutedState) { a.play().catch(() => {}); } }
             await updateDoc(doc(db, "rooms", roomId), { players: newPlayers });
         }
     };
@@ -300,9 +424,26 @@ export default function RoomPage() {
     };
 
     const handleKickPlayer = async (playerId: string) => {
-        if (user?.uid !== room?.host.uid || !room) return;
-        const playerToRemove = room.players.find(p => p.uid === playerId);
-        if(playerToRemove) await updateDoc(doc(db, "rooms", roomId), { players: arrayRemove(playerToRemove), playerIds: arrayRemove(playerId) });
+        if (user?.uid !== room?.host.uid || !room || playerId === user.uid) return;
+        const roomRef = doc(db, "rooms", roomId);
+        try {
+            await runTransaction(db, async (transaction) => {
+                const roomDoc = await transaction.get(roomRef);
+                if (!roomDoc.exists()) throw new Error("Room does not exist.");
+                
+                const roomData = roomDoc.data() as GameRoom;
+                const newPlayers = roomData.players.filter(p => p.uid !== playerId);
+                const newPlayerIds = roomData.playerIds.filter(id => id !== playerId);
+
+                if (newPlayers.length === roomData.players.length) return; // Player not found
+                
+                transaction.update(roomRef, { players: newPlayers, playerIds: newPlayerIds });
+            });
+            toast.success("Player kicked.");
+        } catch (error) {
+            console.error("Error kicking player:", error);
+            toast.error("Failed to kick player.");
+        }
     };
 
     const handleMakeHost = async (playerId: string) => {
@@ -323,6 +464,22 @@ export default function RoomPage() {
         } catch (error) { toast.error("Failed to send invite."); }
     }
     
+    const handleUpdateRoomName = async () => {
+        if (!room || !isHost || !newRoomName.trim() || newRoomName === room.name) {
+            setIsEditingName(false);
+            setNewRoomName(room?.name || '');
+            return;
+        }
+        try {
+            await updateDoc(doc(db, "rooms", roomId), { name: newRoomName });
+            toast.success("Room name updated.");
+            setIsEditingName(false);
+        } catch (error) {
+            toast.error("Failed to update room name.");
+            console.error(error);
+        }
+    };
+
     const handleStartGame = () => {
         if(!room) return;
         if (room.players.every(p => p.isReady)) { toast.success("Starting game!"); }
@@ -333,15 +490,18 @@ export default function RoomPage() {
         return <div className="flex items-center justify-center min-h-screen bg-zinc-900"><LoaderCircle className="h-8 w-8 animate-spin text-green-400" /></div>;
     }
 
-    const isHost = user.uid === room.host.uid;
+    const myUid = user!.uid;
+
+    const isHost = myUid === room.host.uid;
 
     const renderPlayerSlots = () => Array.from({ length: room.maxPlayers }).map((_, i) => {
         const player = room.players[i];
         if (player) {
-            const isCurrentUser = player.uid === user.uid;
+            const isCurrentUser = player.uid === myUid;
             const isPlayerHost = player.uid === room.host.uid;
             return (
                 <div key={player.uid} className={cn('relative bg-zinc-800 rounded-lg p-3 flex flex-col items-center justify-between border-2 transition-all duration-200', player.isSpeaking && !player.isMuted ? 'border-blue-400 shadow-lg shadow-blue-400/20 animate-pulse' : player.isReady ? 'border-green-500' : 'border-zinc-700')}>
+            <audio ref={localMonitorRef} autoPlay playsInline style={{ display: 'none' }} />
                     {isHost && !isCurrentUser && (
                         <div className="absolute top-1 right-1" ref={menuRef}>
                             <Button variant="ghost" size="icon" className="h-7 w-7 rounded-full hover:bg-zinc-700" onClick={() => setPlayerMenuOpen(playerMenuOpen === player.uid ? null : player.uid)}>
@@ -392,9 +552,46 @@ export default function RoomPage() {
 
     return (
         <div className="dark font-sans bg-zinc-900 text-zinc-100 min-h-screen flex flex-col p-4">
+            {Object.entries(remoteStreams).map(([uid, stream]) => {
+                const player = room?.players.find(p => p.uid === uid);
+                return <audio key={uid} ref={audioEl => {
+                    if (audioEl) {
+                        if (audioEl.srcObject !== stream) audioEl.srcObject = stream;
+                        audioEl.muted = !!player?.isMuted;
+                    }
+                }} autoPlay playsInline />;
+            })}
+            
             <header className="flex-shrink-0 bg-black/50 backdrop-blur-sm p-2 rounded-md mb-4">
                 <div className="flex justify-between items-center">
-                    <div className="text-lg font-bold truncate pr-4">{room.name}</div>
+                    {isEditingName ? (
+                        <div className="flex items-center gap-2 w-full">
+                            <Input 
+                                value={newRoomName}
+                                onChange={(e) => setNewRoomName(e.target.value)}
+                                onKeyDown={(e) => {
+                                    if (e.key === 'Enter') handleUpdateRoomName();
+                                    if (e.key === 'Escape') {
+                                        setIsEditingName(false);
+                                        setNewRoomName(room.name);
+                                    }
+                                }}
+                                className="h-9 text-lg font-bold"
+                                autoFocus
+                            />
+                            <Button size="icon" className="h-9 w-9" onClick={handleUpdateRoomName}><Check className="h-5 w-5" /></Button>
+                            <Button size="icon" variant="destructive" className="h-9 w-9" onClick={() => { setIsEditingName(false); setNewRoomName(room.name); }}><XIcon className="h-5 w-5" /></Button>
+                        </div>
+                    ) : (
+                        <div className="flex items-center gap-2 group">
+                            <h2 className="text-lg font-bold truncate pr-4">{room.name}</h2>
+                            {isHost && (
+                                <Button size="icon" variant="ghost" className="h-7 w-7 opacity-0 group-hover:opacity-100 transition-opacity" onClick={() => setIsEditingName(true)}>
+                                    <Pencil className="h-4 w-4" />
+                                </Button>
+                            )}
+                        </div>
+                    )}
                 </div>
             </header>
 
@@ -406,8 +603,8 @@ export default function RoomPage() {
                     <h3 className="text-lg font-bold mb-4 flex items-center gap-2 flex-shrink-0"><MessageSquare /> Chat</h3>
                     <div className="flex-grow overflow-y-auto mb-4 space-y-3 pr-2 text-sm">
                        {room.chatMessages.map((msg, i) => (
-                           <div key={i} className={cn("flex flex-col w-full", msg.senderUID === user.uid ? "items-end" : "items-start")}>
-                               <div className={cn("max-w-[90%] rounded-lg px-3 py-2", msg.senderUID === user.uid ? "bg-primary text-primary-foreground" : "bg-zinc-700")}>
+                           <div key={i} className={cn("flex flex-col w-full", msg.senderUID === myUid ? "items-end" : "items-start")}>
+                               <div className={cn("max-w-[90%] rounded-lg px-3 py-2", msg.senderUID === myUid ? "bg-primary text-primary-foreground" : "bg-zinc-700")}>
                                    {msg.senderUID !== user.uid && <p className="text-xs font-bold text-blue-400 mb-1">{msg.sender}</p>}
                                    <p className="text-sm break-words">{msg.text}</p>
                                </div>
@@ -428,7 +625,11 @@ export default function RoomPage() {
             <footer className="flex-shrink-0 bg-black/50 backdrop-blur-sm p-3 rounded-md mt-4 flex justify-between items-center">
                 <Button variant="destructive" onClick={handleLeaveRoom}>Leave Room</Button>
                 <div className="flex items-center gap-2">
-                    {isHost && (
+                    
+                    <Button variant="outline" onClick={() => setMonitorOn(v => !v)}>
+                        {monitorOn ? 'Mic Monitor: On' : 'Mic Monitor: Off'}
+                    </Button>
+{isHost && (
                         <>
                             <Button variant="secondary" onClick={() => setInviteDialogOpen(true)}>Invite Friends</Button>
                             <Button onClick={handleStartGame} className="bg-green-600 hover:bg-green-700">Start Game</Button>
