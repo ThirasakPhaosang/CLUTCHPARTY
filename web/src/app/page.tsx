@@ -7,7 +7,9 @@
 import React, { useState, useEffect, FC, forwardRef, HTMLAttributes, InputHTMLAttributes, ButtonHTMLAttributes, LabelHTMLAttributes } from 'react';
 import { useRouter } from 'next/navigation';
 import { auth, db } from '../lib/firebase';
-import { doc, setDoc, serverTimestamp } from 'firebase/firestore';
+// Fix: Import `updateDoc` from 'firebase/firestore' to resolve the 'Cannot find name' error.
+import { doc, setDoc, serverTimestamp, getDoc, updateDoc } from 'firebase/firestore';
+import { toast } from "sonner";
 
 // Firebase imports
 import { 
@@ -17,6 +19,7 @@ import {
   signInAnonymously, 
   signInWithPopup, 
   GoogleAuthProvider,
+  User
 } from 'firebase/auth';
 
 import { cva, type VariantProps } from "class-variance-authority";
@@ -113,7 +116,6 @@ const CardContent = forwardRef<HTMLDivElement, HTMLAttributes<HTMLDivElement>>(
 );
 CardContent.displayName = "CardContent";
 
-// ⬇️ ใช้ type alias แทน interface ว่าง
 type InputProps = InputHTMLAttributes<HTMLInputElement>;
 
 const Input = forwardRef<HTMLInputElement, InputProps>(
@@ -147,16 +149,42 @@ const Label = forwardRef<HTMLLabelElement, LabelHTMLAttributes<HTMLLabelElement>
 );
 Label.displayName = "Label";
 
-
 // --- FIREBASE CONFIG & INIT ---
 const googleProvider = new GoogleAuthProvider();
 
 const toMessage = (err: unknown): string => {
   if (err && typeof err === 'object' && 'message' in err) {
-    return err.message as string;
+    const message = (err as any).message || "An unknown error occurred.";
+    // Clean up Firebase error codes
+    return message.replace(/Firebase: |\(auth\/.*\)\.?/g, '').trim();
   }
   return "Something went wrong. Please try again.";
 };
+
+const createOrUpdateUserProfile = async (user: User) => {
+    const userDocRef = doc(db, "users", user.uid);
+    const userDocSnap = await getDoc(userDocRef);
+
+    if (!userDocSnap.exists()) {
+        const tag = `#${String(Math.floor(1000 + Math.random() * 9000))}`;
+        await setDoc(userDocRef, {
+            uid: user.uid,
+            email: user.email,
+            displayName: user.isAnonymous ? 'Guest' : user.displayName,
+            tag: user.isAnonymous || user.displayName ? tag : null, // Give anon users and google users a tag
+            createdAt: serverTimestamp(),
+            friends: [],
+            status: 'online',
+            lastSeen: serverTimestamp()
+        });
+    } else {
+        await updateDoc(userDocRef, {
+            status: 'online',
+            lastSeen: serverTimestamp()
+        })
+    }
+}
+
 
 // --- AUTH COMPONENTS ---
 
@@ -178,18 +206,12 @@ const LoginPage: FC = () => {
         await signInWithEmailAndPassword(auth, email, password);
       } else {
         const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-        const user = userCredential.user;
-        await setDoc(doc(db, "users", user.uid), {
-          uid: user.uid,
-          email: user.email,
-          displayName: null,
-          tag: null,
-          createdAt: serverTimestamp(),
-          friends: [],
-        });
+        await createOrUpdateUserProfile(userCredential.user);
       }
     } catch (err: unknown) {
-      setError(toMessage(err));
+      const msg = toMessage(err);
+      setError(msg);
+      toast.error(msg);
     } finally {
       setLoading(null);
     }
@@ -199,9 +221,12 @@ const LoginPage: FC = () => {
     setError(null);
     setLoading('google');
     try {
-      await signInWithPopup(auth, googleProvider);
+      const result = await signInWithPopup(auth, googleProvider);
+      await createOrUpdateUserProfile(result.user);
     } catch (err: unknown) {
-      setError(toMessage(err));
+        const msg = toMessage(err);
+        setError(msg);
+        toast.error(msg);
     } finally {
       setLoading(null);
     }
@@ -211,9 +236,12 @@ const LoginPage: FC = () => {
     setError(null);
     setLoading('anonymous');
     try {
-      await signInAnonymously(auth);
+        const result = await signInAnonymously(auth);
+        await createOrUpdateUserProfile(result.user);
     } catch (err: unknown) {
-      setError(toMessage(err));
+        const msg = toMessage(err);
+        setError(msg);
+        toast.error(msg);
     } finally {
       setLoading(null);
     }
@@ -251,11 +279,12 @@ const LoginPage: FC = () => {
                 placeholder="••••••••"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleAuthAction('login')}
                 className="pl-10"
               />
             </div>
           </div>
-          {error && <p className="text-sm text-destructive">{error}</p>}
+          {error && <p className="text-sm text-destructive text-center">{error}</p>}
           <div className="flex flex-col space-y-2">
             <Button onClick={() => handleAuthAction('login')} disabled={!!loading}>
               {loading === 'login' && <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />}

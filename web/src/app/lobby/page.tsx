@@ -10,6 +10,7 @@ import { auth, db } from '../../lib/firebase';
 import { onAuthStateChanged, signOut, User } from 'firebase/auth';
 import { doc, getDoc, updateDoc, collection, query, where, getDocs, setDoc, serverTimestamp, arrayUnion, onSnapshot, addDoc, Timestamp, writeBatch, deleteDoc, runTransaction } from "firebase/firestore";
 import Image from 'next/image';
+import { toast } from "sonner";
 
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import * as SliderPrimitive from "@radix-ui/react-slider";
@@ -19,7 +20,7 @@ import * as TabsPrimitive from "@radix-ui/react-tabs";
 import { cva, type VariantProps } from "class-variance-authority";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
-import { LogOut, LoaderCircle, Users, Lock, Search, PlusCircle, UsersRound, Gamepad2, UserPlus, Check, X, Hourglass, MailQuestion } from "lucide-react";
+import { LogOut, LoaderCircle, Users, Lock, Search, PlusCircle, UsersRound, Gamepad2, UserPlus, Check, X, Hourglass, MailQuestion, Send, Bell } from "lucide-react";
 
 // --- TYPES ---
 interface UserProfile {
@@ -27,8 +28,10 @@ interface UserProfile {
   email: string | null;
   displayName: string | null;
   tag: string | null;
-  createdAt: Timestamp | null;     // ← แทน any
+  createdAt: Timestamp;
   friends: string[];
+  status?: 'online' | 'offline';
+  lastSeen?: Timestamp;
 }
 
 interface FriendRequest {
@@ -36,7 +39,7 @@ interface FriendRequest {
   from: { uid: string; displayName: string | null; tag: string | null; };
   to: { uid: string; displayName: string | null; tag: string | null; };
   status: 'pending' | 'accepted' | 'declined';
-  createdAt: Timestamp | null;     // ← แทน any
+  createdAt: Timestamp;
 }
 
 interface GameRoom {
@@ -55,10 +58,22 @@ interface GameRoom {
     tag: string | null;
     isReady: boolean;
     isMuted: boolean;
+    isSpeaking: boolean;
   }[];
   playerIds: string[];
   createdAt: Timestamp;
 }
+
+interface GameInvite {
+    id: string;
+    from: { uid: string; displayName: string | null; };
+    to: { uid: string; };
+    roomId: string;
+    roomName: string;
+    status: 'pending' | 'accepted' | 'declined';
+    createdAt: Timestamp;
+}
+
 
 // --- UTILS & COMPONENTS ---
 function cn(...inputs: ClassValue[]) {
@@ -156,7 +171,6 @@ const TabsContent = forwardRef<React.ElementRef<typeof TabsPrimitive.Content>, R
 TabsContent.displayName = TabsPrimitive.Content.displayName;
 
 const Dialog = DialogPrimitive.Root;
-// ⬇️ ลบ DialogTrigger ที่ไม่ใช้เพื่อลด no-unused-vars
 const DialogPortal = DialogPrimitive.Portal;
 const DialogOverlay = forwardRef<React.ElementRef<typeof DialogPrimitive.Overlay>,React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay>>(({ className, ...props }, ref) => (
   <DialogPrimitive.Overlay ref={ref} className={cn("fixed inset-0 z-50 bg-black/80",className)} {...props}/>
@@ -271,20 +285,26 @@ const FriendsTab: FC<{ user: User; userProfile: UserProfile }> = ({ user, userPr
   }, [user.uid]);
 
   useEffect(() => {
-    const unsubFriends = onSnapshot(doc(db, "users", user.uid), async (docSnap) => {
-      const profile = docSnap.data() as UserProfile;
-      if (profile && profile.friends && profile.friends.length > 0) {
-        const friendPromises = profile.friends.map(friendId => getDoc(doc(db, "users", friendId)));
-        const friendDocs = await Promise.all(friendPromises);
-        const friendsData = friendDocs.filter(d => d.exists()).map(d => d.data() as UserProfile);
-        setFriends(friendsData);
-      } else {
+    if (!userProfile?.friends || userProfile.friends.length === 0) {
         setFriends([]);
-      }
-    });
+        return;
+    }
 
-    return () => unsubFriends();
-  }, [user.uid]);
+    const unsubscribes = userProfile.friends.map(friendId => {
+        const friendDocRef = doc(db, "users", friendId);
+        return onSnapshot(friendDocRef, (docSnap) => {
+            if (docSnap.exists()) {
+                const friendData = docSnap.data() as UserProfile;
+                setFriends(prevFriends => {
+                    const otherFriends = prevFriends.filter(f => f.uid !== friendId);
+                    return [...otherFriends, friendData].sort((a, b) => (a.displayName || '').localeCompare(b.displayName || ''));
+                });
+            }
+        });
+    });
+    return () => unsubscribes.forEach(unsub => unsub());
+}, [userProfile?.friends]);
+
 
   const handleSearch = async () => {
     if (!searchQuery.includes('#') || searchQuery.trim().length < 5) {
@@ -312,7 +332,7 @@ const FriendsTab: FC<{ user: User; userProfile: UserProfile }> = ({ user, userPr
   
   const handleSendRequest = async (targetUser: UserProfile) => {
     if (userProfile.friends.includes(targetUser.uid)) {
-      alert(`You are already friends with ${targetUser.displayName}.`);
+      toast.error(`You are already friends with ${targetUser.displayName}.`);
       return;
     }
     
@@ -320,7 +340,7 @@ const FriendsTab: FC<{ user: User; userProfile: UserProfile }> = ({ user, userPr
       req => (req.from.uid === targetUser.uid || req.to.uid === targetUser.uid)
     );
     if (existingRequest) {
-      alert("A friend request is already pending with this user.");
+      toast.info("A friend request is already pending with this user.");
       return;
     }
 
@@ -334,12 +354,12 @@ const FriendsTab: FC<{ user: User; userProfile: UserProfile }> = ({ user, userPr
         status: 'pending',
         createdAt: serverTimestamp()
       });
-      alert(`Friend request sent to ${targetUser.displayName}${targetUser.tag}`);
+      toast.success(`Friend request sent to ${targetUser.displayName}${targetUser.tag}`);
       setSearchResults([]);
       setSearchQuery('');
     } catch (error) {
       console.error("Error sending friend request:", error);
-      alert("Failed to send friend request.");
+      toast.error("Failed to send friend request.");
     }
   };
   
@@ -357,30 +377,30 @@ const FriendsTab: FC<{ user: User; userProfile: UserProfile }> = ({ user, userPr
 
     try {
       await batch.commit();
-      alert(`You are now friends with ${request.from.displayName}.`);
+      toast.success(`You are now friends with ${request.from.displayName}.`);
     } catch (error) {
       console.error("Error accepting friend request:", error);
-      alert("Failed to accept friend request.");
+      toast.error("Failed to accept friend request.");
     }
   };
   
   const handleDeclineRequest = async (requestId: string) => {
     try {
       await deleteDoc(doc(db, "friendRequests", requestId));
-      alert("Friend request declined.");
+      toast.info("Friend request declined.");
     } catch (error) {
       console.error("Error declining friend request:", error);
-      alert("Failed to decline friend request.");
+      toast.error("Failed to decline friend request.");
     }
   };
   
   const handleCancelRequest = async (requestId: string) => {
     try {
       await deleteDoc(doc(db, "friendRequests", requestId));
-      alert("Friend request cancelled.");
+      toast.info("Friend request cancelled.");
     } catch (error) {
       console.error("Error cancelling friend request:", error);
-      alert("Failed to cancel friend request.");
+      toast.error("Failed to cancel friend request.");
     }
   };
 
@@ -392,7 +412,7 @@ const FriendsTab: FC<{ user: User; userProfile: UserProfile }> = ({ user, userPr
       <div className="space-y-2">
         <h4 className="font-semibold">Add Friend</h4>
         <div className="flex gap-2">
-          <Input placeholder="username#1234" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
+          <Input placeholder="username#1234" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleSearch()} />
           <Button onClick={handleSearch} disabled={isLoading}>
             {isLoading ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
           </Button>
@@ -436,32 +456,12 @@ const FriendsTab: FC<{ user: User; userProfile: UserProfile }> = ({ user, userPr
         <h4 className="font-semibold flex items-center gap-2"><Hourglass className="h-4 w-4 text-primary"/> Sent Requests</h4>
         <div className="border rounded-md">
           {sentRequests && sentRequests.length > 0 ? (
-            sentRequests.map((req) => {
-              const toUser = req.to;
-              const display = toUser.displayName ?? toUser.uid;
-              const tag = toUser.tag ?? "";
-
-              return (
-                <div key={req.id} className="flex items-center justify-between p-2">
-                  <div className="flex items-center space-x-2">
-                    <Image
-                      src="/default-avatar.png"
-                      alt={display}
-                      width={32}
-                      height={32}
-                      className="rounded-full"
-                    />
-                    <div className="text-sm">
-                      <div className="font-medium">{display}{tag}</div>
-                      {/* no email available on FriendRequest.to; remove or fetch if needed */}
-                    </div>
-                  </div>
-                  <div>
-                    <Button size="sm" variant="destructive" onClick={() => handleCancelRequest(req.id)}>Cancel</Button>
-                  </div>
-                </div>
-              );
-            })
+            sentRequests.map(req => (
+              <div key={req.id} className="flex items-center justify-between p-3 border-b last:border-b-0">
+                  <span>{req.to.displayName}{req.to.tag}</span>
+                  <Button size="sm" variant="ghost" onClick={() => handleCancelRequest(req.id)}>Cancel</Button>
+              </div>
+            ))
           ) : (
             <p className="p-4 text-center text-muted-foreground">No sent requests.</p>
           )}
@@ -473,8 +473,10 @@ const FriendsTab: FC<{ user: User; userProfile: UserProfile }> = ({ user, userPr
           {friends.length > 0 ? (
             friends.map(friend => (
               <div key={friend.uid} className="flex items-center justify-between p-3 border-b last:border-b-0">
-                <span>{friend.displayName}{friend.tag}</span>
-                <span className="text-xs text-green-400">Online</span>
+                <div className="flex items-center gap-2">
+                    <span className={cn("h-2 w-2 rounded-full", friend.status === 'online' ? 'bg-green-400' : 'bg-muted-foreground')} />
+                    <span>{friend.displayName}{friend.tag}</span>
+                </div>
               </div>
             ))
           ) : (
@@ -486,6 +488,97 @@ const FriendsTab: FC<{ user: User; userProfile: UserProfile }> = ({ user, userPr
   );
 };
 
+const InvitationsTab: FC<{ user: User }> = ({ user }) => {
+    const [invites, setInvites] = useState<GameInvite[]>([]);
+    const router = useRouter();
+
+    useEffect(() => {
+        const q = query(collection(db, "invitations"), where("to.uid", "==", user.uid), where("status", "==", "pending"));
+        const unsub = onSnapshot(q, (snapshot) => {
+            const newInvites = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as GameInvite));
+            setInvites(newInvites);
+        });
+        return () => unsub();
+    }, [user.uid]);
+
+    const handleAccept = async (invite: GameInvite) => {
+        const roomRef = doc(db, "rooms", invite.roomId);
+        const userRef = doc(db, "users", user.uid);
+        try {
+            const [roomSnap, userSnap] = await Promise.all([getDoc(roomRef), getDoc(userRef)]);
+            if (!roomSnap.exists() || !userSnap.exists()) {
+                toast.error("Room or user not found.");
+                await deleteDoc(doc(db, "invitations", invite.id));
+                return;
+            }
+
+            const roomData = roomSnap.data() as GameRoom;
+            const userData = userSnap.data() as UserProfile;
+            
+            if(roomData.players.length >= roomData.maxPlayers) {
+                toast.error("Room is full.");
+                await deleteDoc(doc(db, "invitations", invite.id));
+                return;
+            }
+             if (roomData.playerIds.includes(user.uid)) {
+                router.push(`/room/${invite.roomId}`);
+                return;
+            }
+
+            const newPlayer = {
+                uid: user.uid,
+                displayName: userData.displayName,
+                tag: userData.tag,
+                isReady: false,
+                isMuted: true,
+                isSpeaking: false,
+            };
+
+            await updateDoc(roomRef, { 
+                players: arrayUnion(newPlayer),
+                playerIds: arrayUnion(user.uid)
+            });
+
+            await deleteDoc(doc(db, "invitations", invite.id));
+            router.push(`/room/${invite.roomId}`);
+
+        } catch (error) {
+            console.error(error);
+            toast.error("Failed to join room.");
+        }
+    };
+
+    const handleDecline = async (inviteId: string) => {
+        await deleteDoc(doc(db, "invitations", inviteId));
+        toast.info("Invite declined.");
+    };
+
+    return (
+        <div className="space-y-4">
+            <h4 className="font-semibold flex items-center gap-2"><Bell className="h-4 w-4 text-primary"/> Game Invites</h4>
+            <div className="border rounded-md">
+                {invites.length > 0 ? (
+                    invites.map(invite => (
+                        <div key={invite.id} className="flex items-center justify-between p-3 border-b last:border-b-0">
+                            <div>
+                                <p><span className="font-semibold">{invite.from.displayName}</span> invited you to</p>
+                                <p className="text-sm text-muted-foreground">{invite.roomName}</p>
+                            </div>
+                            <div className="flex gap-2">
+                                <Button size="sm" variant="secondary" onClick={() => handleAccept(invite)}><Check className="h-4 w-4" /></Button>
+                                <Button size="sm" variant="destructive" onClick={() => handleDecline(invite.id)}><X className="h-4 w-4" /></Button>
+                            </div>
+                        </div>
+                    ))
+                ) : (
+                    <p className="p-4 text-center text-muted-foreground">No pending game invites.</p>
+                )}
+            </div>
+        </div>
+    );
+};
+
+
 const CreateRoom: FC<{ user: User | null, userProfile: UserProfile | null }> = ({ user, userProfile }) => {
   const router = useRouter();
   const [roomName, setRoomName] = useState('');
@@ -495,16 +588,16 @@ const CreateRoom: FC<{ user: User | null, userProfile: UserProfile | null }> = (
   const [isCreating, setIsCreating] = useState(false);
 
   const handleCreateRoom = async () => {
-    if (!user || !userProfile || !userProfile.displayName) {
-      alert("You must be logged in and have a profile to create a room.");
+    if (!user || !userProfile) {
+      toast.error("You must be logged in to create a room.");
       return;
     }
     if (!roomName.trim()) {
-      alert("Room name cannot be empty.");
+      toast.error("Room name cannot be empty.");
       return;
     }
     if (isPrivate && !password) {
-      alert("Please enter a password for your private room.");
+      toast.error("Please enter a password for your private room.");
       return;
     }
 
@@ -514,7 +607,7 @@ const CreateRoom: FC<{ user: User | null, userProfile: UserProfile | null }> = (
         name: roomName,
         maxPlayers,
         hasPassword: isPrivate,
-        password: isPrivate ? password : null,
+        password: isPrivate ? password : "",
         host: {
           uid: user.uid,
           displayName: userProfile.displayName,
@@ -524,18 +617,20 @@ const CreateRoom: FC<{ user: User | null, userProfile: UserProfile | null }> = (
           displayName: userProfile.displayName,
           tag: userProfile.tag,
           isReady: false,
-          isMuted: false,
+          isMuted: true,
+          isSpeaking: false,
         }],
         playerIds: [user.uid],
         createdAt: serverTimestamp(),
-        chatMessages: []
+        chatMessages: [],
+        status: 'waiting',
       };
       const roomRef = await addDoc(collection(db, "rooms"), newRoomData);
       router.push(`/room/${roomRef.id}`);
 
     } catch (error) {
       console.error("Error creating room:", error);
-      alert("Failed to create room. Please try again.");
+      toast.error("Failed to create room. Please try again.");
     } finally {
       setIsCreating(false);
     }
@@ -608,7 +703,7 @@ const RoomList: FC<{ user: User | null, userProfile: UserProfile | null }> = ({ 
   const handleJoinRoom = async (room: GameRoom, enteredPassword?: string) => {
     if (!user || !userProfile) return;
     if (room.hasPassword && room.password !== enteredPassword) {
-      alert("Incorrect password.");
+      toast.error("Incorrect password.");
       return;
     }
 
@@ -628,7 +723,8 @@ const RoomList: FC<{ user: User | null, userProfile: UserProfile | null }> = ({ 
           displayName: userProfile.displayName,
           tag: userProfile.tag,
           isReady: false,
-          isMuted: false,
+          isMuted: true,
+          isSpeaking: false,
         };
 
         transaction.update(roomRef, { 
@@ -640,7 +736,7 @@ const RoomList: FC<{ user: User | null, userProfile: UserProfile | null }> = ({ 
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : String(error);
       console.error("Error joining room: ", error);
-      alert(`Failed to join room: ${msg}`);
+      toast.error(`Failed to join room: ${msg}`);
     } finally {
       setIsJoining(false);
       setSelectedRoom(null);
@@ -667,11 +763,11 @@ const RoomList: FC<{ user: User | null, userProfile: UserProfile | null }> = ({ 
                   <div key={room.id} className="flex items-center justify-between p-3 rounded-md hover:bg-accent">
                     <div className="flex items-center gap-3">
                       {room.hasPassword ? <Lock className="h-4 w-4 text-muted-foreground" /> : <div className="w-4" />}
-                      <div><p className="font-semibold">{room.name}</p><p className="text-xs text-muted-foreground">ID: {room.id}</p></div>
+                      <div><p className="font-semibold">{room.name}</p><p className="text-xs text-muted-foreground">Hosted by {room.host.displayName}</p></div>
                     </div>
                     <div className="flex items-center gap-4">
                       <div className="flex items-center gap-2 text-sm text-muted-foreground"><UsersRound className="h-4 w-4" /><span>{room.players.length}/{room.maxPlayers}</span></div>
-                      <Button size="sm" variant="secondary" onClick={() => handleJoinClick(room)} disabled={isJoining}>Join</Button>
+                      <Button size="sm" variant="secondary" onClick={() => handleJoinClick(room)} disabled={isJoining || room.players.length >= room.maxPlayers}>Join</Button>
                     </div>
                   </div>
                 )) : !loadingRooms && (
@@ -691,10 +787,8 @@ const RoomList: FC<{ user: User | null, userProfile: UserProfile | null }> = ({ 
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-4 py-4">
-          <div className="grid grid-cols-4 items-center gap-4">
-            <Label htmlFor="password-input" className="text-right">Password</Label>
-            <Input id="password-input" type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="col-span-3" />
-          </div>
+            <Label htmlFor="password-input">Password</Label>
+            <Input id="password-input" type="password" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && selectedRoom && handleJoinRoom(selectedRoom, password)} />
         </div>
         <Button onClick={() => selectedRoom && handleJoinRoom(selectedRoom, password)} disabled={isJoining}>
           {isJoining ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> : null}
@@ -713,17 +807,44 @@ export default function LobbyPage() {
   const router = useRouter();
 
   useEffect(() => {
+    if (user) {
+        const userDocRef = doc(db, "users", user.uid);
+        const updateUserStatus = (status: 'online' | 'offline') => {
+            updateDoc(userDocRef, { status, lastSeen: serverTimestamp() }).catch(() => {});
+        };
+
+        updateUserStatus('online');
+        const handleBeforeUnload = () => updateUserStatus('offline');
+        window.addEventListener('beforeunload', handleBeforeUnload);
+
+        return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+    }
+  }, [user]);
+
+  useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       if (currentUser) {
         setUser(currentUser);
         const userDocRef = doc(db, "users", currentUser.uid);
         const userDocSnap = await getDoc(userDocRef);
         if (userDocSnap.exists()) {
-          setUserProfile(userDocSnap.data() as UserProfile);
-        } else if (!currentUser.isAnonymous) {
-          const newProfile: UserProfile = { uid: currentUser.uid, email: currentUser.email, displayName: null, tag: null, createdAt: serverTimestamp() as unknown as Timestamp, friends: [] };
-          await setDoc(userDocRef, newProfile);
-          setUserProfile(newProfile);
+          const profile = userDocSnap.data() as UserProfile;
+          await updateDoc(userDocRef, { status: 'online', lastSeen: serverTimestamp() });
+          setUserProfile(profile);
+        } else {
+            const tag = `#${String(Math.floor(1000 + Math.random() * 9000))}`;
+            const newProfile: UserProfile = {
+                uid: currentUser.uid,
+                email: currentUser.email,
+                displayName: currentUser.isAnonymous ? `Guest` : null,
+                tag: currentUser.isAnonymous ? tag : null,
+                createdAt: serverTimestamp() as Timestamp,
+                friends: [],
+                status: 'online',
+                lastSeen: serverTimestamp() as Timestamp
+            };
+            await setDoc(userDocRef, newProfile);
+            setUserProfile(newProfile);
         }
       } else { router.push('/'); }
       setLoading(false);
@@ -732,16 +853,19 @@ export default function LobbyPage() {
   }, [router]);
 
   const handleProfileCreated = (profile: UserProfile) => setUserProfile(profile);
-  const handleSignOut = async () => { await signOut(auth); router.push('/'); };
+  const handleSignOut = async () => { 
+    if (user) {
+        await updateDoc(doc(db, "users", user.uid), { status: 'offline', lastSeen: serverTimestamp() });
+    }
+    await signOut(auth);
+    router.push('/'); 
+  };
 
-  if (loading || (user && !user.isAnonymous && !userProfile)) {
+  if (loading || !user) {
     return <div className="flex items-center justify-center min-h-screen bg-background dark"><LoaderCircle className="h-8 w-8 animate-spin text-primary" /></div>;
   }
-  if (!user) return null;
-
-  const isProfileSetupComplete = user.isAnonymous || (userProfile && userProfile.displayName);
-
-  if (!isProfileSetupComplete) {
+  
+  if (!user.isAnonymous && !(userProfile?.displayName)) {
     return <div className="dark font-sans bg-background text-foreground min-h-screen flex flex-col"><ProfileSetup user={user} onProfileCreated={handleProfileCreated} /></div>;
   }
 
@@ -751,7 +875,7 @@ export default function LobbyPage() {
         <header className="flex items-center justify-between pb-6 border-b mb-8">
           <div className="flex items-center gap-2"><Gamepad2 className="h-7 w-7 text-primary" /><h1 className="text-2xl font-bold">CLUTCHPARTY</h1></div>
           <div className="flex items-center gap-4">
-            <span className="hidden sm:inline text-sm">{user.isAnonymous ? "Anonymous" : `${userProfile?.displayName}${userProfile?.tag}`}</span>
+            <span className="hidden sm:inline text-sm">{userProfile?.displayName}{userProfile?.tag}</span>
             <Button variant="ghost" size="sm" onClick={handleSignOut}><LogOut className="mr-2 h-4 w-4" />Sign Out</Button>
           </div>
         </header>
@@ -764,10 +888,14 @@ export default function LobbyPage() {
               <TabsList>
                 <TabsTrigger value="public">Public Lobbies</TabsTrigger>
                 {!user.isAnonymous && <TabsTrigger value="friends">Friends</TabsTrigger>}
+                {!user.isAnonymous && <TabsTrigger value="invites">Invites</TabsTrigger>}
               </TabsList>
               <TabsContent value="public" className="flex-grow mt-4 min-h-0"><RoomList user={user} userProfile={userProfile} /></TabsContent>
               {!user.isAnonymous && userProfile && (
                 <TabsContent value="friends" className="flex-grow mt-4 min-h-0 overflow-y-auto"><FriendsTab user={user} userProfile={userProfile} /></TabsContent>
+              )}
+               {!user.isAnonymous && (
+                <TabsContent value="invites" className="flex-grow mt-4 min-h-0 overflow-y-auto"><InvitationsTab user={user} /></TabsContent>
               )}
             </Tabs>
           </section>
