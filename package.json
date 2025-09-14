@@ -1,0 +1,14 @@
+{
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  },
+  "scripts": {
+    "dev": "concurrently \"npm:dev:web\" \"npm:dev:server\"",
+    "dev:web": "npm --workspace web run dev",
+    "dev:server": "npm --workspace server run start:dev"
+  },
+  "workspaces": [
+    "web",
+    "server"
+  ]
+}
