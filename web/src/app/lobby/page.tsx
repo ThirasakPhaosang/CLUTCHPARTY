@@ -862,81 +862,83 @@ export default function LobbyPage() {
   const [isEditProfileOpen, setEditProfileOpen] = useState(false);
   const router = useRouter();
 
-  // Fix: Correctly handle Firestore listener unsubscription to prevent memory leaks and fix scoping errors.
   useEffect(() => {
-    const updateUserStatus = async (uid: string, status: 'online' | 'offline') => {
+    let unsubProfile: (() => void) | undefined;
+    let heartbeatInterval: ReturnType<typeof setInterval> | undefined;
+
+    const updateUserStatus = (uid: string, status: 'online' | 'offline') => {
         const userDocRef = doc(db, "users", uid);
-        try {
-            await updateDoc(userDocRef, { status, lastSeen: serverTimestamp() });
-        } catch (error) {
-            // This might fail if the user is new and the doc doesn't exist yet. It's fine.
-        }
+        updateDoc(userDocRef, { status, lastSeen: serverTimestamp() }).catch(() => {});
     };
 
-    let unsubProfile: (() => void) | undefined;
+    const unsubscribeAuth = onAuthStateChanged(auth, async (currentUser) => {
+        // Clean up previous user's listeners and intervals
+        if (unsubProfile) unsubProfile();
+        if (heartbeatInterval) clearInterval(heartbeatInterval);
 
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
-      if (unsubProfile) {
-        unsubProfile();
-        unsubProfile = undefined;
-      }
-        
-      if (currentUser) {
-        setUser(currentUser);
-        const userDocRef = doc(db, "users", currentUser.uid);
-        
-        unsubProfile = onSnapshot(userDocRef, (docSnap) => {
-            if (docSnap.exists()) {
-                setUserProfile(docSnap.data() as UserProfile);
+        if (currentUser) {
+            setUser(currentUser);
+            
+            const userDocRef = doc(db, "users", currentUser.uid);
+            unsubProfile = onSnapshot(userDocRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    setUserProfile(docSnap.data() as UserProfile);
+                }
+            });
+
+            // Set initial status to online and start heartbeat
+            updateUserStatus(currentUser.uid, 'online');
+            heartbeatInterval = setInterval(() => {
+                if (auth.currentUser) {
+                    updateUserStatus(auth.currentUser.uid, 'online');
+                }
+            }, 15000); // Heartbeat every 15 seconds
+
+            const userDocSnap = await getDoc(userDocRef);
+            if (!userDocSnap.exists()) {
+                const tag = `#${String(Math.floor(1000 + Math.random() * 9000))}`;
+                const isNewEmailUser = !currentUser.isAnonymous && !currentUser.displayName;
+                const newProfile: UserProfile = {
+                    uid: currentUser.uid,
+                    email: currentUser.email,
+                    displayName: currentUser.isAnonymous ? `Guest` : currentUser.displayName,
+                    tag: currentUser.isAnonymous || currentUser.displayName ? tag : null,
+                    createdAt: serverTimestamp() as Timestamp,
+                    friends: [],
+                    status: 'online',
+                    lastSeen: serverTimestamp() as Timestamp,
+                    profileInitialized: !isNewEmailUser,
+                };
+                await setDoc(userDocRef, newProfile);
+                setUserProfile(newProfile);
+            } else {
+                setUserProfile(userDocSnap.data() as UserProfile)
             }
-        });
-
-        // This handles initial status setting after profile is confirmed to exist or created.
-        const userDocSnap = await getDoc(userDocRef);
-        if (userDocSnap.exists()) {
-          setUserProfile(userDocSnap.data() as UserProfile);
-          await updateUserStatus(currentUser.uid, 'online');
-        } else {
-            const tag = `#${String(Math.floor(1000 + Math.random() * 9000))}`;
-            const isNewEmailUser = !currentUser.isAnonymous && !currentUser.displayName;
-            const newProfile: UserProfile = {
-                uid: currentUser.uid,
-                email: currentUser.email,
-                displayName: currentUser.isAnonymous ? `Guest` : currentUser.displayName,
-                tag: currentUser.isAnonymous || currentUser.displayName ? tag : null,
-                createdAt: serverTimestamp() as Timestamp,
-                friends: [],
-                status: 'online',
-                lastSeen: serverTimestamp() as Timestamp,
-                profileInitialized: !isNewEmailUser,
-            };
-            await setDoc(userDocRef, newProfile);
-            setUserProfile(newProfile);
+        } else { 
+            router.push('/'); 
         }
-      } else { 
-          router.push('/'); 
-      }
-      setLoading(false);
+        setLoading(false);
     });
 
     const handleBeforeUnload = () => {
         if (auth.currentUser) {
+            // This is a best-effort attempt as it's not guaranteed to run
             updateUserStatus(auth.currentUser.uid, 'offline');
         }
     };
     window.addEventListener('beforeunload', handleBeforeUnload);
 
     return () => {
-        unsubscribe();
-        if (unsubProfile) {
-          unsubProfile();
-        }
+        unsubscribeAuth();
+        if (unsubProfile) unsubProfile();
+        if (heartbeatInterval) clearInterval(heartbeatInterval);
         window.removeEventListener('beforeunload', handleBeforeUnload);
         if (auth.currentUser) {
              updateUserStatus(auth.currentUser.uid, 'offline');
         }
     };
   }, [router]);
+
 
   const handleProfileCreated = (profile: UserProfile) => setUserProfile(profile);
   const handleSignOut = async () => { 

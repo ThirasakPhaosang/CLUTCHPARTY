@@ -106,6 +106,10 @@ const DialogTitle = forwardRef< React.ElementRef<typeof DialogPrimitive.Title>, 
   <DialogPrimitive.Title ref={ref} className={cn("text-lg font-semibold leading-none tracking-tight", className)} {...props} />
 ))
 DialogTitle.displayName = DialogPrimitive.Title.displayName
+const DialogDescription = forwardRef<React.ElementRef<typeof DialogPrimitive.Description>, React.ComponentPropsWithoutRef<typeof DialogPrimitive.Description>>(({ className, ...props }, ref) => (
+    <DialogPrimitive.Description ref={ref} className={cn("text-sm text-muted-foreground", className)} {...props} />
+));
+DialogDescription.displayName = DialogPrimitive.Description.displayName;
 
 
 // --- GAME ROOM PAGE ---
@@ -459,27 +463,47 @@ useEffect(() => {
     };
     
     const handleToggleReady = async () => {
-        if (!user || !room) return;
-        const playerIndex = room.players.findIndex(p => p.uid === user.uid);
-        if (playerIndex > -1) {
-            const newPlayers = [...room.players];
-            newPlayers[playerIndex].isReady = !newPlayers[playerIndex].isReady;
-            await updateDoc(doc(db, "rooms", roomId), { players: newPlayers });
+        if (!user || !roomId) return;
+        const roomRef = doc(db, "rooms", roomId);
+        try {
+            await runTransaction(db, async (transaction) => {
+                const roomDoc = await transaction.get(roomRef);
+                if (!roomDoc.exists()) throw new Error("Room does not exist.");
+                const currentPlayers = (roomDoc.data().players || []) as Player[];
+                const playerIndex = currentPlayers.findIndex(p => p.uid === user.uid);
+
+                if (playerIndex > -1) {
+                    const newPlayers = [...currentPlayers];
+                    newPlayers[playerIndex] = { ...newPlayers[playerIndex], isReady: !newPlayers[playerIndex].isReady };
+                    transaction.update(roomRef, { players: newPlayers });
+                }
+            });
+        } catch(e) {
+            console.error("Failed to toggle ready state:", e);
+            toast.error("Could not update ready status.");
         }
     };
     
     const handleToggleMute = async () => {
         if (!user || !room) return;
-        const playerIndex = room.players.findIndex(p => p.uid === user.uid);
-        if (playerIndex > -1) {
-            const newPlayers = [...room.players];
-            const newMutedState = !newPlayers[playerIndex].isMuted;
-            newPlayers[playerIndex].isMuted = newMutedState;
+        const player = room.players.find(p => p.uid === user.uid);
+        if (player) {
+            const newMutedState = !player.isMuted;
             if (audioStreamRef.current) {
                 audioStreamRef.current.getAudioTracks().forEach(track => { track.enabled = !newMutedState; });
             }
-            const a = localMonitorRef.current; if (a) { a.muted = newMutedState; if (!newMutedState) { a.play().catch(() => {}); } }
-            await updateDoc(doc(db, "rooms", roomId), { players: newPlayers });
+            
+            const roomRef = doc(db, "rooms", roomId);
+            await runTransaction(db, async (transaction) => {
+                const roomDoc = await transaction.get(roomRef);
+                if (!roomDoc.exists()) throw new Error("Room does not exist.");
+                const currentPlayers = roomDoc.data().players as Player[];
+                const updatedPlayers = currentPlayers.map(p => p.uid === user.uid ? { ...p, isMuted: newMutedState } : p);
+                transaction.update(roomRef, { players: updatedPlayers });
+            }).catch(e => {
+                console.error("Mute toggle failed:", e);
+                toast.error("Failed to update mute status.");
+            });
         }
     };
 
@@ -642,13 +666,12 @@ useEffect(() => {
         const unsubscribe = onSnapshot(q, (snapshot) => {
             snapshot.forEach(async (playerDoc) => {
                 const playerData = playerDoc.data() as UserProfile;
-                const GRACE_PERIOD_MS = 15000; // 15 seconds
+                const DISCONNECT_THRESHOLD_MS = 20000; // 20 seconds
     
                 if (
-                    playerData.status === 'offline' &&
                     roomStateRef.current?.playerIds.includes(playerData.uid) &&
                     playerData.lastSeen &&
-                    (Date.now() - playerData.lastSeen.toDate().getTime() > GRACE_PERIOD_MS)
+                    (Date.now() - playerData.lastSeen.toDate().getTime() > DISCONNECT_THRESHOLD_MS)
                 ) {
                     const roomRef = doc(db, "rooms", roomId);
                     try {
@@ -845,7 +868,10 @@ useEffect(() => {
             
             <Dialog open={isInviteDialogOpen} onOpenChange={setInviteDialogOpen}>
                 <DialogContent>
-                    <DialogHeader><DialogTitle>Invite Friends</DialogTitle></DialogHeader>
+                    <DialogHeader>
+                        <DialogTitle>Invite Friends</DialogTitle>
+                        <DialogDescription>Select an online friend to send a game invite to.</DialogDescription>
+                    </DialogHeader>
                     <div className="max-h-[400px] overflow-y-auto space-y-2 mt-4">
                         {onlineFriends.length > 0 ? onlineFriends.map(friend => (
                             <div key={friend.uid} className="flex items-center justify-between p-2 rounded-md hover:bg-accent">
