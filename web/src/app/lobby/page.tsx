@@ -200,7 +200,7 @@ DialogTitle.displayName = DialogPrimitive.Title.displayName
 const DialogDescription = forwardRef<React.ElementRef<typeof DialogPrimitive.Description>, React.ComponentPropsWithoutRef<typeof DialogPrimitive.Description>>(({ className, ...props }, ref) => (
   <DialogPrimitive.Description ref={ref} className={cn("text-sm text-muted-foreground", className)} {...props} />
 ))
-DialogDescription.displayName = DialogPrimitive.Description.displayName
+DialogDescription.displayName = DialogPrimitive.Description.displayName;
 
 // --- LOBBY SUB-COMPONENTS ---
 
@@ -766,7 +766,7 @@ const RoomList: FC<{ user: User | null, userProfile: UserProfile | null }> = ({ 
             <Input placeholder="Search rooms..." className="pl-10" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
           </div>
           <div className="border rounded-lg h-full flex flex-col mt-4">
-            <div className="relative flex-grow overflow-y-auto [mask-image:linear-gradient(to_bottom,black_calc(100%-2rem),transparent)]">
+            <div className="relative flex-grow overflow-y-auto [mask-image:linear-gradient(to_bottom,black_calc(100%-2rem),transparent)] custom-scrollbar">
               <div className="p-1">
                 {loadingRooms && <div className="flex items-center justify-center p-8"><LoaderCircle className="h-6 w-6 animate-spin"/></div>}
                 {!loadingRooms && filteredRooms.length > 0 ? filteredRooms.map((room) => (
@@ -987,10 +987,10 @@ export default function LobbyPage() {
               </TabsList>
               <TabsContent value="public" className="flex-grow mt-4 min-h-0"><RoomList user={user} userProfile={userProfile} /></TabsContent>
               {!user.isAnonymous && userProfile && (
-                <TabsContent value="friends" className="flex-grow mt-4 min-h-0 overflow-y-auto"><FriendsTab user={user} userProfile={userProfile} /></TabsContent>
+                <TabsContent value="friends" className="flex-grow mt-4 min-h-0 overflow-y-auto custom-scrollbar"><FriendsTab user={user} userProfile={userProfile} /></TabsContent>
               )}
                {!user.isAnonymous && (
-                <TabsContent value="invites" className="flex-grow mt-4 min-h-0 overflow-y-auto"><InvitationsTab user={user} /></TabsContent>
+                <TabsContent value="invites" className="flex-grow mt-4 min-h-0 overflow-y-auto custom-scrollbar"><InvitationsTab user={user} /></TabsContent>
               )}
             </Tabs>
           </section>

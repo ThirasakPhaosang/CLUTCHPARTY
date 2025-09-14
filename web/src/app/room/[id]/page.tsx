@@ -840,9 +840,9 @@ useEffect(() => {
                 <section className="flex-grow grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
                     {renderPlayerSlots()}
                 </section>
-                <aside className="w-full lg:max-w-sm bg-black/50 backdrop-blur-sm rounded-md flex flex-col p-4">
+                <aside className="w-full lg:max-w-sm bg-black/50 backdrop-blur-sm rounded-md flex flex-col p-4 min-h-0 overflow-hidden h-[70vh] lg:h-[calc(100vh-200px)]">
                     <h3 className="text-lg font-bold mb-4 flex items-center gap-2 flex-shrink-0"><MessageSquare /> Chat</h3>
-                    <div className="flex-grow overflow-y-auto mb-4 space-y-3 pr-2 text-sm">
+                    <div className="flex-1 overflow-y-auto mb-4 space-y-3 pr-2 text-sm custom-scrollbar min-h-0 overscroll-contain">
                        {room.chatMessages.map((msg, i) => (
                            <div key={i} className={cn("flex flex-col w-full", msg.senderUID === myUid ? "items-end" : "items-start")}>
                                <div className={cn("max-w-[90%] rounded-lg px-3 py-2", msg.senderUID === myUid ? "bg-primary text-primary-foreground" : "bg-zinc-700")}>
