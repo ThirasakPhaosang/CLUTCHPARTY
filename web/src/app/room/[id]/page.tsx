@@ -8,7 +8,7 @@ import React, { useState, useEffect, forwardRef, InputHTMLAttributes, ButtonHTML
 import { useRouter, useParams } from 'next/navigation';
 import { auth, db } from '../../../lib/firebase';
 import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
-import { doc, onSnapshot, updateDoc, deleteDoc, arrayUnion, Timestamp, runTransaction, arrayRemove, collection, query, where, writeBatch, getDocs, addDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, onSnapshot, updateDoc, deleteDoc, arrayUnion, Timestamp, runTransaction, arrayRemove, collection, query, where, writeBatch, getDocs, addDoc, serverTimestamp, type DocumentData, type DocumentSnapshot, type QuerySnapshot, type QueryDocumentSnapshot, type Transaction } from 'firebase/firestore';
 import { cva, type VariantProps } from "class-variance-authority";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
@@ -133,7 +133,7 @@ useEffect(() => {
             if (!currentUser) { router.push('/'); return; }
             setUser(currentUser);
             const userDocRef = doc(db, "users", currentUser.uid);
-            const userUnsubscribe = onSnapshot(userDocRef, (docSnap) => {
+            const userUnsubscribe = onSnapshot(userDocRef, (docSnap: DocumentSnapshot<DocumentData>) => {
                 if (docSnap.exists()) setUserProfile(docSnap.data() as UserProfile);
             });
             return () => userUnsubscribe();
@@ -144,7 +144,7 @@ useEffect(() => {
     useEffect(() => {
         if (!roomId || !user) return;
         const roomRef = doc(db, "rooms", roomId);
-        const roomUnsubscribe = onSnapshot(roomRef, (docSnap) => {
+        const roomUnsubscribe = onSnapshot(roomRef, (docSnap: DocumentSnapshot<DocumentData>) => {
             if (docSnap.exists()) {
                 const roomData = { id: docSnap.id, ...docSnap.data() } as GameRoom;
                 if (!roomData.playerIds.includes(user.uid)) {
@@ -271,7 +271,7 @@ useEffect(() => {
     
         // Listen for signaling messages
         const q = query(signalingCollection, where("to", "==", myId));
-        const signalingUnsubscribe = onSnapshot(q, async (snapshot) => {
+        const signalingUnsubscribe = onSnapshot(q, async (snapshot: QuerySnapshot<DocumentData>) => {
             for (const change of snapshot.docChanges()) {
                 if (change.type === "added") {
                     const { from: fromId, signal } = change.doc.data();
@@ -338,9 +338,9 @@ useEffect(() => {
     useEffect(() => {
         if (!userProfile?.friends || userProfile.friends.length === 0) { setOnlineFriends([]); return; }
         const friendsQuery = query(collection(db, "users"), where('uid', 'in', userProfile.friends));
-        const unsubscribe = onSnapshot(friendsQuery, (snapshot) => {
-            const friendsData = snapshot.docs.map(d => d.data() as UserProfile);
-            const availableFriends = friendsData.filter(f => f.status === 'online' && !room?.playerIds.includes(f.uid));
+        const unsubscribe = onSnapshot(friendsQuery, (snapshot: QuerySnapshot<DocumentData>) => {
+            const friendsData: UserProfile[] = snapshot.docs.map((d: QueryDocumentSnapshot<DocumentData>) => d.data() as UserProfile);
+            const availableFriends = friendsData.filter((f: UserProfile) => f.status === 'online' && !room?.playerIds.includes(f.uid));
             setOnlineFriends(availableFriends);
         });
         return () => unsubscribe();
@@ -350,7 +350,7 @@ useEffect(() => {
         if (!user || !roomId) return;
         const roomRef = doc(db, "rooms", roomId);
         try {
-            await runTransaction(db, async (transaction) => {
+            await runTransaction(db, async (transaction: Transaction) => {
                 const roomDoc = await transaction.get(roomRef);
                 if (!roomDoc.exists()) return;
 
@@ -424,10 +424,21 @@ useEffect(() => {
     };
 
     const handleKickPlayer = async (playerId: string) => {
-        if (user?.uid !== room?.host.uid || !room || playerId === user.uid) return;
+        if (!room || !user) {
+            toast.error("Room or user data not available");
+            return;
+        }
+        if (user.uid !== room.host.uid) {
+            toast.error("Only the host can kick players");
+            return;
+        }
+        if (playerId === user.uid) {
+            toast.error("You cannot kick yourself");
+            return;
+        }
         const roomRef = doc(db, "rooms", roomId);
         try {
-            await runTransaction(db, async (transaction) => {
+            await runTransaction(db, async (transaction: Transaction) => {
                 const roomDoc = await transaction.get(roomRef);
                 if (!roomDoc.exists()) throw new Error("Room does not exist.");
                 
