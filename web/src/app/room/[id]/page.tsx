@@ -8,7 +8,7 @@ import React, { useState, useEffect, forwardRef, InputHTMLAttributes, ButtonHTML
 import { useRouter, useParams } from 'next/navigation';
 import { auth, db } from '../../../lib/firebase';
 import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
-import { doc, onSnapshot, updateDoc, deleteDoc, arrayUnion, Timestamp, runTransaction, arrayRemove, collection, query, where, writeBatch, getDocs, addDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, onSnapshot, updateDoc, deleteDoc, arrayUnion, Timestamp, runTransaction, arrayRemove, collection, query, where, writeBatch, getDocs, addDoc, serverTimestamp, getDoc } from 'firebase/firestore';
 import { cva, type VariantProps } from "class-variance-authority";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
@@ -123,12 +123,12 @@ export default function RoomPage() {
     const isSpeakingRef = useRef(false);
     const peerConnectionsRef = useRef<{ [key: string]: RTCPeerConnection }>({});
     const [remoteStreams, setRemoteStreams] = useState<{ [key: string]: MediaStream }>({});
-
+    const iceCandidateQueues = useRef<{ [key: string]: RTCIceCandidateInit[] }>({});
     
     const localMonitorRef = useRef<HTMLAudioElement | null>(null);
     const [monitorOn, setMonitorOn] = useState<boolean>(false);
 
-useEffect(() => {
+    useEffect(() => {
         const authUnsubscribe = onAuthStateChanged(auth, (currentUser) => {
             if (!currentUser) { router.push('/'); return; }
             setUser(currentUser);
@@ -235,86 +235,135 @@ useEffect(() => {
     }, [user?.uid, roomId, monitorOn]);
 
     // WebRTC connection management
-    useEffect(() => {
-        if (!user || !roomId || !audioStreamRef.current || !room?.players) return;
+useEffect(() => {
+    if (!user || !roomId || !audioStreamRef.current || !room?.players) return;
 
-        const myId = user.uid;
-        const roomRef = doc(db, "rooms", roomId);
-        const signalingCollection = collection(roomRef, 'signaling');
-        const pcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
-    
-        const createPeerConnection = (peerId: string, initiator: boolean) => {
-            if (peerConnectionsRef.current[peerId]) return peerConnectionsRef.current[peerId];
-    
-            const pc = new RTCPeerConnection(pcConfig);
-            peerConnectionsRef.current[peerId] = pc;
-    
-            audioStreamRef.current?.getTracks().forEach(track => pc.addTrack(track, audioStreamRef.current!));
-    
-            pc.ontrack = (event) => setRemoteStreams(prev => ({ ...prev, [peerId]: event.streams[0] }));
-    
-            pc.onicecandidate = event => {
-                if (event.candidate) {
-                    addDoc(signalingCollection, { from: myId, to: peerId, signal: { type: 'candidate', candidate: event.candidate.toJSON() } });
+    const myId = user.uid;
+    const roomRef = doc(db, "rooms", roomId);
+    const signalingCollection = collection(roomRef, 'signaling');
+    const pcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+    const localPeerConnections = { ...peerConnectionsRef.current };
+
+    const createPeerConnection = (peerId: string, initiator: boolean) => {
+        if (localPeerConnections[peerId]) return localPeerConnections[peerId];
+
+        const pc = new RTCPeerConnection(pcConfig);
+        localPeerConnections[peerId] = pc;
+
+        audioStreamRef.current?.getTracks().forEach(track => pc.addTrack(track, audioStreamRef.current!));
+
+        pc.ontrack = (event) => {
+            setRemoteStreams(prev => {
+                if (prev[peerId] !== event.streams[0]) {
+                    return { ...prev, [peerId]: event.streams[0] };
                 }
-            };
-    
-            if (initiator) {
-                pc.onnegotiationneeded = async () => {
-                    try {
+                return prev;
+            });
+        };
+
+        pc.onicecandidate = event => {
+            if (event.candidate) {
+                addDoc(signalingCollection, { from: myId, to: peerId, signal: { type: 'candidate', candidate: event.candidate.toJSON() } });
+            }
+        };
+
+        if (initiator) {
+            let makingOffer = false;
+            pc.onnegotiationneeded = async () => {
+                if (makingOffer) {
+                    return;
+                }
+                try {
+                    makingOffer = true;
+                    if (pc.signalingState === 'stable') {
                         const offer = await pc.createOffer();
                         await pc.setLocalDescription(offer);
                         await addDoc(signalingCollection, { from: myId, to: peerId, signal: { type: 'offer', sdp: pc.localDescription?.sdp } });
-                    } catch (err) { console.error("Create offer error:", err); }
-                };
-            }
-            return pc;
-        };
-    
-        const playerIds = room.playerIds.filter(id => id !== myId);
-    
-        // Initiate connections to other players, preventing glare
-        playerIds.forEach(peerId => {
-            const isInitiator = myId < peerId;
-            createPeerConnection(peerId, isInitiator);
-        });
-    
-        // Listen for signaling messages
-        const q = query(signalingCollection, where("to", "==", myId));
-        const signalingUnsubscribe = onSnapshot(q, async (snapshot) => {
-            for (const change of snapshot.docChanges()) {
-                if (change.type === "added") {
-                    const { from: fromId, signal } = change.doc.data();
-                    const pc = createPeerConnection(fromId, false);
-    
-                    if (signal.type === 'offer' && pc.signalingState !== 'stable') {
-                        try {
-                            await pc.setRemoteDescription({ type: 'offer', sdp: signal.sdp });
+                    }
+                } catch (err) { 
+                    console.error(`[${myId}] Create offer error to ${peerId}:`, err); 
+                } finally {
+                    makingOffer = false;
+                }
+            };
+        }
+        return pc;
+    };
+
+    const playerIds = room.playerIds.filter(id => id !== myId);
+
+    playerIds.forEach(peerId => {
+        const isInitiator = myId < peerId;
+        createPeerConnection(peerId, isInitiator);
+    });
+
+    Object.keys(localPeerConnections).forEach(peerId => {
+        if (!playerIds.includes(peerId)) {
+            localPeerConnections[peerId].close();
+            delete localPeerConnections[peerId];
+        }
+    });
+
+    peerConnectionsRef.current = localPeerConnections;
+
+    const q = query(signalingCollection, where("to", "==", myId));
+    const signalingUnsubscribe = onSnapshot(q, async (snapshot) => {
+        for (const change of snapshot.docChanges()) {
+            if (change.type === "added") {
+                const signalDoc = change.doc;
+                const { from: fromId, signal } = signalDoc.data();
+                const pc = peerConnectionsRef.current[fromId];
+
+                if (!pc) {
+                    await deleteDoc(signalDoc.ref);
+                    continue;
+                }
+
+                try {
+                    if (signal.type === 'offer') {
+                        if (pc.signalingState !== 'stable') {
+                           console.warn(`[${myId}] Ignoring offer from ${fromId} due to non-stable state: ${pc.signalingState}`);
+                        } else {
+                            await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: signal.sdp }));
+                            const queue = iceCandidateQueues.current[fromId] || [];
+                            for(const candidate of queue) { await pc.addIceCandidate(new RTCIceCandidate(candidate)); }
+                            iceCandidateQueues.current[fromId] = [];
                             const answer = await pc.createAnswer();
                             await pc.setLocalDescription(answer);
                             await addDoc(signalingCollection, { from: myId, to: fromId, signal: { type: 'answer', sdp: pc.localDescription?.sdp } });
-                        } catch (err) { console.error('Error handling offer:', err); }
+                        }
                     } else if (signal.type === 'answer') {
-                        try {
-                            await pc.setRemoteDescription({ type: 'answer', sdp: signal.sdp });
-                        } catch (err) { console.error('Error handling answer:', err); }
+                        if (pc.signalingState === 'have-local-offer') {
+                            await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: signal.sdp }));
+                             const queue = iceCandidateQueues.current[fromId] || [];
+                            for(const candidate of queue) { await pc.addIceCandidate(new RTCIceCandidate(candidate)); }
+                            iceCandidateQueues.current[fromId] = [];
+                        } else {
+                            console.warn(`[${myId}] Received answer from ${fromId} in wrong state: ${pc.signalingState}`);
+                        }
                     } else if (signal.candidate) {
-                        try {
-                           if (pc.remoteDescription) await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
-                        } catch (err) { console.error('Error adding ICE candidate:', err); }
+                       if (pc.remoteDescription) {
+                           await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
+                       } else {
+                           if (!iceCandidateQueues.current[fromId]) iceCandidateQueues.current[fromId] = [];
+                           iceCandidateQueues.current[fromId].push(signal.candidate);
+                       }
                     }
-                    await deleteDoc(change.doc.ref); // Clean up signal
+                } catch (err) {
+                    console.error(`Error processing signal type ${signal.type} from ${fromId}:`, err);
                 }
+                
+                await deleteDoc(signalDoc.ref);
             }
-        });
-    
-        // Cleanup on component unmount or dependencies change
-        return () => {
-            signalingUnsubscribe();
-            Object.values(peerConnectionsRef.current).forEach(pc => pc.close());
-            peerConnectionsRef.current = {};
-        };
-    }, [roomId, user, room?.playerIds.join(','), audioStreamRef.current]);
+        }
+    });
+
+    return () => {
+        signalingUnsubscribe();
+        Object.values(peerConnectionsRef.current).forEach(pc => pc.close());
+        peerConnectionsRef.current = {};
+    };
+}, [roomId, user, room?.playerIds.sort().join(','), audioStreamRef.current]);
     
     useEffect(() => {
         chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
