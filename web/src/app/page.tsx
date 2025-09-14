@@ -1,103 +1,322 @@
-import Image from "next/image";
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+*/
+"use client";
 
-export default function Home() {
+import React, { useState, useEffect, FC, forwardRef, HTMLAttributes, InputHTMLAttributes, ButtonHTMLAttributes, LabelHTMLAttributes } from 'react';
+import { useRouter } from 'next/navigation';
+import { auth, db } from '../lib/firebase';
+import { doc, setDoc, serverTimestamp } from 'firebase/firestore';
+
+// Firebase imports
+import { 
+  onAuthStateChanged, 
+  signInWithEmailAndPassword, 
+  createUserWithEmailAndPassword,
+  signInAnonymously, 
+  signInWithPopup, 
+  GoogleAuthProvider,
+} from 'firebase/auth';
+
+import { cva, type VariantProps } from "class-variance-authority";
+import { clsx, type ClassValue } from "clsx";
+import { twMerge } from "tailwind-merge";
+import { Mail, KeyRound, LoaderCircle } from "lucide-react";
+
+// --- UTILS ---
+function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
+}
+
+// --- UI COMPONENTS ---
+const buttonVariants = cva(
+  "inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50",
+  {
+    variants: {
+      variant: {
+        default: "bg-primary text-primary-foreground hover:bg-primary/90",
+        destructive: "bg-destructive text-destructive-foreground hover:bg-destructive/90",
+        outline: "border border-input bg-background hover:bg-accent hover:text-accent-foreground",
+        secondary: "bg-secondary text-secondary-foreground hover:bg-secondary/80",
+        ghost: "hover:bg-accent hover:text-accent-foreground",
+        link: "text-primary underline-offset-4 hover:underline",
+      },
+      size: {
+        default: "h-10 px-4 py-2",
+        sm: "h-9 rounded-md px-3",
+        lg: "h-11 rounded-md px-8",
+        icon: "h-10 w-10",
+      },
+    },
+    defaultVariants: {
+      variant: "default",
+      size: "default",
+    },
+  }
+)
+
+export type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> &
+  VariantProps<typeof buttonVariants> & {
+    asChild?: boolean;
+  };
+
+const Button = forwardRef<HTMLButtonElement, ButtonProps>(
+  ({ className, variant, size, ...props }, ref) => {
+    return (
+      <button
+        className={cn(buttonVariants({ variant, size, className }))}
+        ref={ref}
+        {...props}
+      />
+    );
+  }
+);
+Button.displayName = "Button";
+
+const Card = forwardRef<HTMLDivElement, HTMLAttributes<HTMLDivElement>>(
+  ({ className, ...props }, ref) => (
+    <div
+      ref={ref}
+      className={cn("rounded-lg border bg-card text-card-foreground shadow-sm", className)}
+      {...props}
+    />
+  )
+);
+Card.displayName = "Card";
+
+const CardHeader = forwardRef<HTMLDivElement, HTMLAttributes<HTMLDivElement>>(
+  ({ className, ...props }, ref) => (
+    <div ref={ref} className={cn("flex flex-col space-y-1.5 p-6", className)} {...props} />
+  )
+);
+CardHeader.displayName = "CardHeader";
+
+const CardTitle = forwardRef<HTMLHeadingElement, HTMLAttributes<HTMLHeadingElement>>(
+  ({ className, ...props }, ref) => (
+    <h3 ref={ref} className={cn("text-2xl font-semibold leading-none tracking-tight", className)} {...props} />
+  )
+);
+CardTitle.displayName = "CardTitle";
+
+const CardDescription = forwardRef<HTMLParagraphElement, HTMLAttributes<HTMLParagraphElement>>(
+  ({ className, ...props }, ref) => (
+    <p ref={ref} className={cn("text-sm text-muted-foreground", className)} {...props} />
+  )
+);
+CardDescription.displayName = "CardDescription";
+
+const CardContent = forwardRef<HTMLDivElement, HTMLAttributes<HTMLDivElement>>(
+  ({ className, ...props }, ref) => (
+    <div ref={ref} className={cn("p-6 pt-0", className)} {...props} />
+  )
+);
+CardContent.displayName = "CardContent";
+
+// ⬇️ ใช้ type alias แทน interface ว่าง
+type InputProps = InputHTMLAttributes<HTMLInputElement>;
+
+const Input = forwardRef<HTMLInputElement, InputProps>(
+  ({ className, type, ...props }, ref) => {
+    return (
+      <input
+        type={type}
+        className={cn(
+          "flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50",
+          className
+        )}
+        ref={ref}
+        {...props}
+      />
+    );
+  }
+);
+Input.displayName = "Input";
+
+const Label = forwardRef<HTMLLabelElement, LabelHTMLAttributes<HTMLLabelElement>>(
+  ({ className, ...props }, ref) => (
+    <label
+      ref={ref}
+      className={cn(
+        "text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70",
+        className
+      )}
+      {...props}
+    />
+  )
+);
+Label.displayName = "Label";
+
+
+// --- FIREBASE CONFIG & INIT ---
+const googleProvider = new GoogleAuthProvider();
+
+const toMessage = (err: unknown): string => {
+  if (err && typeof err === 'object' && 'message' in err) {
+    return err.message as string;
+  }
+  return "Something went wrong. Please try again.";
+};
+
+// --- AUTH COMPONENTS ---
+
+const LoginPage: FC = () => {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState<string | null>(null);
+
+  const handleAuthAction = async (action: 'login' | 'signup') => {
+    if (!email || !password) {
+      setError("Please enter both email and password.");
+      return;
+    }
+    setError(null);
+    setLoading(action);
+    try {
+      if (action === 'login') {
+        await signInWithEmailAndPassword(auth, email, password);
+      } else {
+        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+        const user = userCredential.user;
+        await setDoc(doc(db, "users", user.uid), {
+          uid: user.uid,
+          email: user.email,
+          displayName: null,
+          tag: null,
+          createdAt: serverTimestamp(),
+          friends: [],
+        });
+      }
+    } catch (err: unknown) {
+      setError(toMessage(err));
+    } finally {
+      setLoading(null);
+    }
+  };
+
+  const handleGoogleSignIn = async () => {
+    setError(null);
+    setLoading('google');
+    try {
+      await signInWithPopup(auth, googleProvider);
+    } catch (err: unknown) {
+      setError(toMessage(err));
+    } finally {
+      setLoading(null);
+    }
+  };
+
+  const handleAnonymousSignIn = async () => {
+    setError(null);
+    setLoading('anonymous');
+    try {
+      await signInAnonymously(auth);
+    } catch (err: unknown) {
+      setError(toMessage(err));
+    } finally {
+      setLoading(null);
+    }
+  };
+
   return (
-    <div className="font-sans grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20">
-      <main className="flex flex-col gap-[32px] row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="font-mono list-inside list-decimal text-sm/6 text-center sm:text-left">
-          <li className="mb-2 tracking-[-.01em]">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] font-mono font-semibold px-1 py-0.5 rounded">
-              src/app/page.tsx
-            </code>
-            .
-          </li>
-          <li className="tracking-[-.01em]">
-            Save and see your changes instantly.
-          </li>
-        </ol>
-
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:w-auto"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 w-full sm:w-auto md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
+    <Card className="w-full max-w-sm">
+      <CardHeader>
+        <CardTitle>CLUTCHPARTY</CardTitle>
+        <CardDescription>Sign in to continue</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="email">Email</Label>
+            <div className="relative">
+              <Mail className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <Input 
+                id="email" 
+                type="email" 
+                placeholder="you@example.com" 
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                className="pl-10"
+              />
+            </div>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="password">Password</Label>
+            <div className="relative">
+              <KeyRound className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <Input 
+                id="password" 
+                type="password"
+                placeholder="••••••••"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="pl-10"
+              />
+            </div>
+          </div>
+          {error && <p className="text-sm text-destructive">{error}</p>}
+          <div className="flex flex-col space-y-2">
+            <Button onClick={() => handleAuthAction('login')} disabled={!!loading}>
+              {loading === 'login' && <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />}
+              Sign In
+            </Button>
+            <Button variant="secondary" onClick={() => handleAuthAction('signup')} disabled={!!loading}>
+              {loading === 'signup' && <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />}
+              Sign Up
+            </Button>
+          </div>
+          <div className="relative">
+            <div className="absolute inset-0 flex items-center">
+              <span className="w-full border-t" />
+            </div>
+            <div className="relative flex justify-center text-xs uppercase">
+              <span className="bg-background px-2 text-muted-foreground">Or continue with</span>
+            </div>
+          </div>
+          <Button variant="outline" className="w-full" onClick={handleGoogleSignIn} disabled={!!loading}>
+            {loading === 'google' ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> : 
+            <svg className="mr-2 h-4 w-4" aria-hidden="true" focusable="false" data-prefix="fab" data-icon="google" role="img" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 488 512"><path fill="currentColor" d="M488 261.8C488 403.3 381.5 512 244 512 110.3 512 0 398.8 0 256S110.3 0 244 0c77.2 0 142.3 28.5 195.4 73.8L391.1 126.8c-29.9-28.5-69.5-46.5-121.7-46.5-94.8 0-172.2 77.4-172.2 172.2s77.4 172.2 172.2 172.2c108.4 0 151.2-86.4 155.6-128.2H244v-94.2h244z"></path></svg>
+            }
+            Google
+          </Button>
+          <Button variant="ghost" className="w-full" onClick={handleAnonymousSignIn} disabled={!!loading}>
+            {loading === 'anonymous' && <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />}
+            Sign In Anonymously
+          </Button>
         </div>
-      </main>
-      <footer className="row-start-3 flex gap-[24px] flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
+      </CardContent>
+    </Card>
+  );
+};
+
+// --- MAIN PAGE COMPONENT ---
+export default function Home() {
+  const [loading, setLoading] = useState(true);
+  const router = useRouter();
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      if (currentUser) {
+        router.push('/lobby');
+      } else {
+        setLoading(false);
+      }
+    });
+    return () => unsubscribe();
+  }, [router]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <LoaderCircle className="h-8 w-8 animate-spin text-primary" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="font-sans flex items-center justify-center min-h-screen p-4 bg-background dark">
+      <LoginPage />
     </div>
   );
 }

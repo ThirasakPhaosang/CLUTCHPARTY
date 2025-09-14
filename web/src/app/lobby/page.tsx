@@ -1,0 +1,778 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+*/
+"use client";
+
+import React, { useState, useEffect, FC, forwardRef, HTMLAttributes, InputHTMLAttributes, ButtonHTMLAttributes } from 'react';
+import { useRouter } from 'next/navigation';
+import { auth, db } from '../../lib/firebase';
+import { onAuthStateChanged, signOut, User } from 'firebase/auth';
+import { doc, getDoc, updateDoc, collection, query, where, getDocs, setDoc, serverTimestamp, arrayUnion, onSnapshot, addDoc, Timestamp, writeBatch, deleteDoc, runTransaction } from "firebase/firestore";
+import Image from 'next/image';
+
+import * as DialogPrimitive from "@radix-ui/react-dialog";
+import * as SliderPrimitive from "@radix-ui/react-slider";
+import * as SwitchPrimitives from "@radix-ui/react-switch";
+import * as TabsPrimitive from "@radix-ui/react-tabs";
+
+import { cva, type VariantProps } from "class-variance-authority";
+import { clsx, type ClassValue } from "clsx";
+import { twMerge } from "tailwind-merge";
+import { LogOut, LoaderCircle, Users, Lock, Search, PlusCircle, UsersRound, Gamepad2, UserPlus, Check, X, Hourglass, MailQuestion } from "lucide-react";
+
+// --- TYPES ---
+interface UserProfile {
+  uid: string;
+  email: string | null;
+  displayName: string | null;
+  tag: string | null;
+  createdAt: Timestamp | null;     // ← แทน any
+  friends: string[];
+}
+
+interface FriendRequest {
+  id: string;
+  from: { uid: string; displayName: string | null; tag: string | null; };
+  to: { uid: string; displayName: string | null; tag: string | null; };
+  status: 'pending' | 'accepted' | 'declined';
+  createdAt: Timestamp | null;     // ← แทน any
+}
+
+interface GameRoom {
+  id: string;
+  name: string;
+  maxPlayers: number;
+  hasPassword?: boolean;
+  password?: string;
+  host: {
+    uid: string;
+    displayName: string | null;
+  };
+  players: {
+    uid: string;
+    displayName: string | null;
+    tag: string | null;
+    isReady: boolean;
+    isMuted: boolean;
+  }[];
+  playerIds: string[];
+  createdAt: Timestamp;
+}
+
+// --- UTILS & COMPONENTS ---
+function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
+}
+
+const buttonVariants = cva(
+  "inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50",
+  {
+    variants: {
+      variant: {
+        default: "bg-primary text-primary-foreground hover:bg-primary/90",
+        destructive: "bg-destructive text-destructive-foreground hover:bg-destructive/90",
+        outline: "border border-input bg-background hover:bg-accent hover:text-accent-foreground",
+        secondary: "bg-secondary text-secondary-foreground hover:bg-secondary/80",
+        ghost: "hover:bg-accent hover:text-accent-foreground",
+      },
+      size: {
+        default: "h-10 px-4 py-2",
+        sm: "h-9 rounded-md px-3",
+        icon: "h-10 w-10",
+      },
+    },
+    defaultVariants: { variant: "default", size: "default" },
+  }
+);
+
+type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & VariantProps<typeof buttonVariants>;
+const Button = forwardRef<HTMLButtonElement, ButtonProps>(
+  ({ className, variant, size, ...props }, ref) => (
+    <button className={cn(buttonVariants({ variant, size, className }))} ref={ref} {...props} />
+  )
+);
+Button.displayName = "Button";
+
+const Card = forwardRef<HTMLDivElement, HTMLAttributes<HTMLDivElement>>(
+  ({ className, ...props }, ref) => (<div ref={ref} className={cn("rounded-lg border bg-card text-card-foreground shadow-sm", className)} {...props} />)
+);
+Card.displayName = "Card";
+
+const CardHeader = forwardRef<HTMLDivElement, HTMLAttributes<HTMLDivElement>>(
+  ({ className, ...props }, ref) => (<div ref={ref} className={cn("flex flex-col space-y-1.5 p-6", className)} {...props} />)
+);
+CardHeader.displayName = "CardHeader";
+
+const CardTitle = forwardRef<HTMLParagraphElement, HTMLAttributes<HTMLHeadingElement>>(
+  ({ className, ...props }, ref) => (<h3 ref={ref} className={cn("text-lg font-semibold leading-none tracking-tight", className)} {...props} />)
+);
+CardTitle.displayName = "CardTitle";
+
+const CardContent = forwardRef<HTMLDivElement, HTMLAttributes<HTMLDivElement>>(
+  ({ className, ...props }, ref) => (<div ref={ref} className={cn("p-6 pt-0", className)} {...props} />)
+);
+CardContent.displayName = "CardContent";
+
+const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(
+  ({ className, type, ...props }, ref) => (<input type={type} className={cn("flex h-10 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50", className)} ref={ref} {...props} />)
+);
+Input.displayName = "Input";
+
+const Label = forwardRef<React.ElementRef<"label">, React.ComponentPropsWithoutRef<"label">>(
+  ({ className, ...props }, ref) => (<label ref={ref} className={cn("text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70", className)} {...props} />)
+);
+Label.displayName = "Label";
+
+const Slider = forwardRef<React.ElementRef<typeof SliderPrimitive.Root>, React.ComponentPropsWithoutRef<typeof SliderPrimitive.Root>>(({ className, ...props }, ref) => (
+  <SliderPrimitive.Root ref={ref} className={cn("relative flex w-full touch-none select-none items-center", className)} {...props}>
+    <SliderPrimitive.Track className="relative h-2 w-full grow overflow-hidden rounded-full bg-secondary">
+      <SliderPrimitive.Range className="absolute h-full bg-primary" />
+    </SliderPrimitive.Track>
+    <SliderPrimitive.Thumb className="block h-5 w-5 rounded-full border-2 border-primary bg-background ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50" />
+  </SliderPrimitive.Root>
+));
+Slider.displayName = SliderPrimitive.Root.displayName;
+
+const Switch = forwardRef<React.ElementRef<typeof SwitchPrimitives.Root>, React.ComponentPropsWithoutRef<typeof SwitchPrimitives.Root>>(({ className, ...props }, ref) => (
+  <SwitchPrimitives.Root className={cn("peer inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-primary data-[state=unchecked]:bg-input", className)} {...props} ref={ref}>
+    <SwitchPrimitives.Thumb className={cn("pointer-events-none block h-5 w-5 rounded-full bg-background shadow-lg ring-0 transition-transform data-[state=checked]:translate-x-5 data-[state=unchecked]:translate-x-0")} />
+  </SwitchPrimitives.Root>
+));
+Switch.displayName = SwitchPrimitives.Root.displayName;
+
+const Tabs = TabsPrimitive.Root;
+const TabsList = forwardRef<React.ElementRef<typeof TabsPrimitive.List>, React.ComponentPropsWithoutRef<typeof TabsPrimitive.List>>(({ className, ...props }, ref) => (
+  <TabsPrimitive.List ref={ref} className={cn("inline-flex h-10 items-center justify-center rounded-md bg-muted p-1 text-muted-foreground", className)} {...props} />
+));
+TabsList.displayName = TabsPrimitive.List.displayName;
+const TabsTrigger = forwardRef<React.ElementRef<typeof TabsPrimitive.Trigger>, React.ComponentPropsWithoutRef<typeof TabsPrimitive.Trigger>>(({ className, ...props }, ref) => (
+  <TabsPrimitive.Trigger ref={ref} className={cn("inline-flex items-center justify-center whitespace-nowrap rounded-sm px-3 py-1.5 text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm", className)} {...props} />
+));
+TabsTrigger.displayName = TabsPrimitive.Trigger.displayName;
+const TabsContent = forwardRef<React.ElementRef<typeof TabsPrimitive.Content>, React.ComponentPropsWithoutRef<typeof TabsPrimitive.Content>>(({ className, ...props }, ref) => (
+  <TabsPrimitive.Content ref={ref} className={cn("mt-2 ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2", className)} {...props} />
+));
+TabsContent.displayName = TabsPrimitive.Content.displayName;
+
+const Dialog = DialogPrimitive.Root;
+// ⬇️ ลบ DialogTrigger ที่ไม่ใช้เพื่อลด no-unused-vars
+const DialogPortal = DialogPrimitive.Portal;
+const DialogOverlay = forwardRef<React.ElementRef<typeof DialogPrimitive.Overlay>,React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay>>(({ className, ...props }, ref) => (
+  <DialogPrimitive.Overlay ref={ref} className={cn("fixed inset-0 z-50 bg-black/80",className)} {...props}/>
+))
+DialogOverlay.displayName = DialogPrimitive.Overlay.displayName
+const DialogContent = forwardRef<React.ElementRef<typeof DialogPrimitive.Content>, React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>>(({ className, children, ...props }, ref) => (
+  <DialogPortal>
+    <DialogOverlay />
+    <DialogPrimitive.Content ref={ref} className={cn("fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 border bg-background p-6 shadow-lg duration-200 sm:rounded-lg", className)} {...props}>
+      {children}
+    </DialogPrimitive.Content>
+  </DialogPortal>
+))
+DialogContent.displayName = DialogPrimitive.Content.displayName
+const DialogHeader = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => (
+  <div className={cn("flex flex-col space-y-1.5 text-center sm:text-left", className)} {...props} />
+)
+DialogHeader.displayName = "DialogHeader"
+const DialogTitle = forwardRef< React.ElementRef<typeof DialogPrimitive.Title>, React.ComponentPropsWithoutRef<typeof DialogPrimitive.Title>>(({ className, ...props }, ref) => (
+  <DialogPrimitive.Title ref={ref} className={cn("text-lg font-semibold leading-none tracking-tight", className)} {...props} />
+))
+DialogTitle.displayName = DialogPrimitive.Title.displayName
+const DialogDescription = forwardRef<React.ElementRef<typeof DialogPrimitive.Description>, React.ComponentPropsWithoutRef<typeof DialogPrimitive.Description>>(({ className, ...props }, ref) => (
+  <DialogPrimitive.Description ref={ref} className={cn("text-sm text-muted-foreground", className)} {...props} />
+))
+DialogDescription.displayName = DialogPrimitive.Description.displayName
+
+// --- LOBBY SUB-COMPONENTS ---
+
+const ProfileSetup: FC<{ user: User; onProfileCreated: (profile: UserProfile) => void }> = ({ user, onProfileCreated }) => {
+  const [displayName, setDisplayName] = useState('');
+  const [error, setError] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+  const tag = `#${String(Math.floor(1000 + Math.random() * 9000))}`;
+
+  const handleSaveProfile = async () => {
+    if (!displayName.trim() || displayName.length < 3) {
+      setError('Display name must be at least 3 characters long.');
+      return;
+    }
+    setError('');
+    setIsSaving(true);
+    try {
+      const userDocRef = doc(db, "users", user.uid);
+      await updateDoc(userDocRef, { displayName, tag });
+      const updatedDoc = await getDoc(userDocRef);
+      onProfileCreated(updatedDoc.data() as UserProfile);
+    } catch (e) {
+      setError('Failed to save profile. Please try again.');
+      console.error("Error updating profile: ", e);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  return (
+    <div className="flex items-center justify-center min-h-screen">
+      <Card className="w-full max-w-md">
+        <CardHeader>
+          <CardTitle>Welcome to CLUTCHPARTY!</CardTitle>
+          <p className="text-sm text-muted-foreground">Choose a display name to get started.</p>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="displayName">Display Name</Label>
+            <div className="flex items-center gap-2">
+              <Input
+                id="displayName"
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+                placeholder="Your awesome name"
+                maxLength={20}
+              />
+              <span className="text-muted-foreground font-semibold whitespace-nowrap">{tag}</span>
+            </div>
+          </div>
+          {error && <p className="text-sm text-destructive">{error}</p>}
+          <Button className="w-full" onClick={handleSaveProfile} disabled={isSaving}>
+            {isSaving ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> : <Check className="mr-2 h-4 w-4" />}
+            Save and Continue
+          </Button>
+        </CardContent>
+      </Card>
+    </div>
+  );
+};
+
+const FriendsTab: FC<{ user: User; userProfile: UserProfile }> = ({ user, userProfile }) => {
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<UserProfile[]>([]);
+  const [searchMessage, setSearchMessage] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+
+  const [incomingRequests, setIncomingRequests] = useState<FriendRequest[]>([]);
+  const [sentRequests, setSentRequests] = useState<FriendRequest[]>([]);
+  const [friends, setFriends] = useState<UserProfile[]>([]);
+
+  useEffect(() => {
+    const incomingQuery = query(collection(db, "friendRequests"), where("to.uid", "==", user.uid), where("status", "==", "pending"));
+    const unsubIncoming = onSnapshot(incomingQuery, (snapshot) => {
+      const requests = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as FriendRequest));
+      setIncomingRequests(requests);
+    });
+
+    const sentQuery = query(collection(db, "friendRequests"), where("from.uid", "==", user.uid), where("status", "==", "pending"));
+    const unsubSent = onSnapshot(sentQuery, (snapshot) => {
+      const requests = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as FriendRequest));
+      setSentRequests(requests);
+    });
+
+    return () => { unsubIncoming(); unsubSent(); };
+  }, [user.uid]);
+
+  useEffect(() => {
+    const unsubFriends = onSnapshot(doc(db, "users", user.uid), async (docSnap) => {
+      const profile = docSnap.data() as UserProfile;
+      if (profile && profile.friends && profile.friends.length > 0) {
+        const friendPromises = profile.friends.map(friendId => getDoc(doc(db, "users", friendId)));
+        const friendDocs = await Promise.all(friendPromises);
+        const friendsData = friendDocs.filter(d => d.exists()).map(d => d.data() as UserProfile);
+        setFriends(friendsData);
+      } else {
+        setFriends([]);
+      }
+    });
+
+    return () => unsubFriends();
+  }, [user.uid]);
+
+  const handleSearch = async () => {
+    if (!searchQuery.includes('#') || searchQuery.trim().length < 5) {
+      setSearchMessage('Please enter a full name and tag (e.g., username#1234).');
+      setSearchResults([]);
+      return;
+    }
+    setIsLoading(true);
+    setSearchMessage('');
+    const [name, tag] = searchQuery.split('#');
+
+    try {
+      const q = query(collection(db, "users"), where("displayName", "==", name.trim()), where("tag", "==", `#${tag.trim()}`));
+      const querySnapshot = await getDocs(q);
+      const results: UserProfile[] = [];
+      querySnapshot.forEach((doc) => { if (doc.id !== user.uid) results.push(doc.data() as UserProfile) });
+      setSearchResults(results);
+      setSearchMessage(results.length === 0 ? 'No users found.' : '');
+    } catch {
+      setSearchMessage('Error searching for users.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+  
+  const handleSendRequest = async (targetUser: UserProfile) => {
+    if (userProfile.friends.includes(targetUser.uid)) {
+      alert(`You are already friends with ${targetUser.displayName}.`);
+      return;
+    }
+    
+    const existingRequest = [...incomingRequests, ...sentRequests].find(
+      req => (req.from.uid === targetUser.uid || req.to.uid === targetUser.uid)
+    );
+    if (existingRequest) {
+      alert("A friend request is already pending with this user.");
+      return;
+    }
+
+    try {
+      const requestId = [user.uid, targetUser.uid].sort().join('_');
+      const requestRef = doc(db, "friendRequests", requestId);
+      
+      await setDoc(requestRef, {
+        from: { uid: user.uid, displayName: userProfile.displayName, tag: userProfile.tag },
+        to: { uid: targetUser.uid, displayName: targetUser.displayName, tag: targetUser.tag },
+        status: 'pending',
+        createdAt: serverTimestamp()
+      });
+      alert(`Friend request sent to ${targetUser.displayName}${targetUser.tag}`);
+      setSearchResults([]);
+      setSearchQuery('');
+    } catch (error) {
+      console.error("Error sending friend request:", error);
+      alert("Failed to send friend request.");
+    }
+  };
+  
+  const handleAcceptRequest = async (request: FriendRequest) => {
+    const batch = writeBatch(db);
+
+    const currentUserRef = doc(db, "users", request.to.uid);
+    batch.update(currentUserRef, { friends: arrayUnion(request.from.uid) });
+
+    const senderUserRef = doc(db, "users", request.from.uid);
+    batch.update(senderUserRef, { friends: arrayUnion(request.to.uid) });
+
+    const requestRef = doc(db, "friendRequests", request.id);
+    batch.delete(requestRef);
+
+    try {
+      await batch.commit();
+      alert(`You are now friends with ${request.from.displayName}.`);
+    } catch (error) {
+      console.error("Error accepting friend request:", error);
+      alert("Failed to accept friend request.");
+    }
+  };
+  
+  const handleDeclineRequest = async (requestId: string) => {
+    try {
+      await deleteDoc(doc(db, "friendRequests", requestId));
+      alert("Friend request declined.");
+    } catch (error) {
+      console.error("Error declining friend request:", error);
+      alert("Failed to decline friend request.");
+    }
+  };
+  
+  const handleCancelRequest = async (requestId: string) => {
+    try {
+      await deleteDoc(doc(db, "friendRequests", requestId));
+      alert("Friend request cancelled.");
+    } catch (error) {
+      console.error("Error cancelling friend request:", error);
+      alert("Failed to cancel friend request.");
+    }
+  };
+
+  const isRequestPending = (targetUid: string) => sentRequests.some(req => req.to.uid === targetUid) || incomingRequests.some(req => req.from.uid === targetUid);
+  const isFriend = (targetUid: string) => friends.some(friend => friend.uid === targetUid);
+
+  return (
+    <div className="space-y-6 text-sm">
+      <div className="space-y-2">
+        <h4 className="font-semibold">Add Friend</h4>
+        <div className="flex gap-2">
+          <Input placeholder="username#1234" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
+          <Button onClick={handleSearch} disabled={isLoading}>
+            {isLoading ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+          </Button>
+        </div>
+      </div>
+      {searchMessage && <p className="text-muted-foreground text-center">{searchMessage}</p>}
+      {searchResults.length > 0 && (
+        <div className="space-y-2">
+          <h4 className="font-semibold">Search Results</h4>
+          <div className="border rounded-md">
+            {searchResults.map(foundUser => (
+              <div key={foundUser.uid} className="flex items-center justify-between p-3 border-b last:border-b-0">
+                <span>{foundUser.displayName}{foundUser.tag}</span>
+                <Button size="sm" variant="secondary" onClick={() => handleSendRequest(foundUser)} disabled={isRequestPending(foundUser.uid) || isFriend(foundUser.uid)}>
+                  {isFriend(foundUser.uid) ? 'Friends' : isRequestPending(foundUser.uid) ? <Hourglass className="h-4 w-4" /> : <UserPlus className="h-4 w-4" />}
+                </Button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      <div className="space-y-2">
+        <h4 className="font-semibold flex items-center gap-2"><MailQuestion className="h-4 w-4 text-primary"/> Incoming Requests</h4>
+        <div className="border rounded-md">
+          {incomingRequests.length > 0 ? (
+            incomingRequests.map(req => (
+              <div key={req.id} className="flex items-center justify-between p-3 border-b last:border-b-0">
+                <span>{req.from.displayName}{req.from.tag}</span>
+                <div className="flex gap-2">
+                  <Button size="sm" variant="secondary" onClick={() => handleAcceptRequest(req)}><Check className="h-4 w-4" /></Button>
+                  <Button size="sm" variant="destructive" onClick={() => handleDeclineRequest(req.id)}><X className="h-4 w-4" /></Button>
+                </div>
+              </div>
+            ))
+          ) : (
+            <p className="p-4 text-center text-muted-foreground">No incoming requests.</p>
+          )}
+        </div>
+      </div>
+      <div className="space-y-2">
+        <h4 className="font-semibold flex items-center gap-2"><Hourglass className="h-4 w-4 text-primary"/> Sent Requests</h4>
+        <div className="border rounded-md">
+          {sentRequests && sentRequests.length > 0 ? (
+            sentRequests.map((req) => {
+              const toUser = req.to;
+              const display = toUser.displayName ?? toUser.uid;
+              const tag = toUser.tag ?? "";
+
+              return (
+                <div key={req.id} className="flex items-center justify-between p-2">
+                  <div className="flex items-center space-x-2">
+                    <Image
+                      src="/default-avatar.png"
+                      alt={display}
+                      width={32}
+                      height={32}
+                      className="rounded-full"
+                    />
+                    <div className="text-sm">
+                      <div className="font-medium">{display}{tag}</div>
+                      {/* no email available on FriendRequest.to; remove or fetch if needed */}
+                    </div>
+                  </div>
+                  <div>
+                    <Button size="sm" variant="destructive" onClick={() => handleCancelRequest(req.id)}>Cancel</Button>
+                  </div>
+                </div>
+              );
+            })
+          ) : (
+            <p className="p-4 text-center text-muted-foreground">No sent requests.</p>
+          )}
+        </div>
+      </div>
+      <div className="space-y-2">
+        <h4 className="font-semibold flex items-center gap-2"><Users className="h-4 w-4 text-primary"/> Friends</h4>
+        <div className="border rounded-md">
+          {friends.length > 0 ? (
+            friends.map(friend => (
+              <div key={friend.uid} className="flex items-center justify-between p-3 border-b last:border-b-0">
+                <span>{friend.displayName}{friend.tag}</span>
+                <span className="text-xs text-green-400">Online</span>
+              </div>
+            ))
+          ) : (
+            <p className="p-4 text-center text-muted-foreground">Your friends list is empty.</p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const CreateRoom: FC<{ user: User | null, userProfile: UserProfile | null }> = ({ user, userProfile }) => {
+  const router = useRouter();
+  const [roomName, setRoomName] = useState('');
+  const [maxPlayers, setMaxPlayers] = useState(4);
+  const [isPrivate, setIsPrivate] = useState(false);
+  const [password, setPassword] = useState('');
+  const [isCreating, setIsCreating] = useState(false);
+
+  const handleCreateRoom = async () => {
+    if (!user || !userProfile || !userProfile.displayName) {
+      alert("You must be logged in and have a profile to create a room.");
+      return;
+    }
+    if (!roomName.trim()) {
+      alert("Room name cannot be empty.");
+      return;
+    }
+    if (isPrivate && !password) {
+      alert("Please enter a password for your private room.");
+      return;
+    }
+
+    setIsCreating(true);
+    try {
+      const newRoomData = {
+        name: roomName,
+        maxPlayers,
+        hasPassword: isPrivate,
+        password: isPrivate ? password : null,
+        host: {
+          uid: user.uid,
+          displayName: userProfile.displayName,
+        },
+        players: [{
+          uid: user.uid,
+          displayName: userProfile.displayName,
+          tag: userProfile.tag,
+          isReady: false,
+          isMuted: false,
+        }],
+        playerIds: [user.uid],
+        createdAt: serverTimestamp(),
+        chatMessages: []
+      };
+      const roomRef = await addDoc(collection(db, "rooms"), newRoomData);
+      router.push(`/room/${roomRef.id}`);
+
+    } catch (error) {
+      console.error("Error creating room:", error);
+      alert("Failed to create room. Please try again.");
+    } finally {
+      setIsCreating(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader><CardTitle>Create Game</CardTitle></CardHeader>
+      <CardContent className="space-y-6">
+        <div className="space-y-2">
+          <Label htmlFor="room-name">Room Name</Label>
+          <Input id="room-name" placeholder="My Awesome Game" value={roomName} onChange={(e) => setRoomName(e.target.value)} />
+        </div>
+        <div className="space-y-2">
+          <div className="flex justify-between items-center">
+            <Label>Max Players</Label>
+            <span className="text-sm font-medium">{maxPlayers}</span>
+          </div>
+          <Slider defaultValue={[4]} min={2} max={8} step={1} onValueChange={(value) => setMaxPlayers(value[0])} />
+        </div>
+        <div className="flex items-center justify-between">
+          <Label htmlFor="private-room" className="flex flex-col gap-1 cursor-pointer">
+            <span>Private Room</span>
+            <span className="font-normal text-xs text-muted-foreground">Only joinable with password.</span>
+          </Label>
+          <Switch id="private-room" checked={isPrivate} onCheckedChange={setIsPrivate} />
+        </div>
+        {isPrivate && (
+          <div className="space-y-2"><Label htmlFor="password">Password</Label><Input id="password" type="password" placeholder="••••••••" value={password} onChange={(e) => setPassword(e.target.value)} /></div>
+        )}
+        <Button className="w-full" onClick={handleCreateRoom} disabled={isCreating}>
+          {isCreating ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin"/> : <PlusCircle className="mr-2 h-4 w-4" />}
+          Create Room
+        </Button>
+      </CardContent>
+    </Card>
+  );
+};
+
+const RoomList: FC<{ user: User | null, userProfile: UserProfile | null }> = ({ user, userProfile }) => {
+  const router = useRouter();
+  const [searchTerm, setSearchTerm] = useState('');
+  const [rooms, setRooms] = useState<GameRoom[]>([]);
+  const [loadingRooms, setLoadingRooms] = useState(true);
+  const [selectedRoom, setSelectedRoom] = useState<GameRoom | null>(null);
+  const [password, setPassword] = useState('');
+  const [isJoining, setIsJoining] = useState(false);
+  
+  useEffect(() => {
+    const q = query(collection(db, "rooms"));
+    const unsubscribe = onSnapshot(q, (querySnapshot) => {
+      const roomsData: GameRoom[] = [];
+      querySnapshot.forEach((doc) => {
+        roomsData.push({ id: doc.id, ...doc.data() } as GameRoom);
+      });
+      setRooms(roomsData);
+      setLoadingRooms(false);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const handleJoinClick = (room: GameRoom) => {
+    if (room.hasPassword) {
+      setSelectedRoom(room);
+    } else {
+      handleJoinRoom(room);
+    }
+  };
+  
+  const handleJoinRoom = async (room: GameRoom, enteredPassword?: string) => {
+    if (!user || !userProfile) return;
+    if (room.hasPassword && room.password !== enteredPassword) {
+      alert("Incorrect password.");
+      return;
+    }
+
+    setIsJoining(true);
+    const roomRef = doc(db, "rooms", room.id);
+    try {
+      await runTransaction(db, async (transaction) => {
+        const roomDoc = await transaction.get(roomRef);
+        if (!roomDoc.exists()) { throw new Error("Room does not exist!"); }
+        
+        const roomData = roomDoc.data() as GameRoom;
+        if (roomData.players.length >= roomData.maxPlayers) { throw new Error("Room is full!"); }
+        if (roomData.playerIds.includes(user.uid)) { return; }
+
+        const newPlayer = {
+          uid: user.uid,
+          displayName: userProfile.displayName,
+          tag: userProfile.tag,
+          isReady: false,
+          isMuted: false,
+        };
+
+        transaction.update(roomRef, { 
+          players: arrayUnion(newPlayer),
+          playerIds: arrayUnion(user.uid)
+        });
+      });
+      router.push(`/room/${room.id}`);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error("Error joining room: ", error);
+      alert(`Failed to join room: ${msg}`);
+    } finally {
+      setIsJoining(false);
+      setSelectedRoom(null);
+      setPassword('');
+    }
+  };
+
+  const filteredRooms = rooms.filter(room => room.name.toLowerCase().includes(searchTerm.toLowerCase()));
+
+  return (
+    <Dialog open={!!selectedRoom} onOpenChange={(open) => !open && setSelectedRoom(null)}>
+      <Card className="flex flex-col h-full">
+        <CardHeader><CardTitle>Game Lobbies</CardTitle></CardHeader>
+        <CardContent className="flex-grow flex flex-col gap-4 min-h-0">
+          <div className="relative w-full sm:max-w-xs">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input placeholder="Search rooms..." className="pl-10" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
+          </div>
+          <div className="border rounded-lg h-full flex flex-col mt-4">
+            <div className="relative flex-grow overflow-y-auto [mask-image:linear-gradient(to_bottom,black_calc(100%-2rem),transparent)]">
+              <div className="p-1">
+                {loadingRooms && <div className="flex items-center justify-center p-8"><LoaderCircle className="h-6 w-6 animate-spin"/></div>}
+                {!loadingRooms && filteredRooms.length > 0 ? filteredRooms.map((room) => (
+                  <div key={room.id} className="flex items-center justify-between p-3 rounded-md hover:bg-accent">
+                    <div className="flex items-center gap-3">
+                      {room.hasPassword ? <Lock className="h-4 w-4 text-muted-foreground" /> : <div className="w-4" />}
+                      <div><p className="font-semibold">{room.name}</p><p className="text-xs text-muted-foreground">ID: {room.id}</p></div>
+                    </div>
+                    <div className="flex items-center gap-4">
+                      <div className="flex items-center gap-2 text-sm text-muted-foreground"><UsersRound className="h-4 w-4" /><span>{room.players.length}/{room.maxPlayers}</span></div>
+                      <Button size="sm" variant="secondary" onClick={() => handleJoinClick(room)} disabled={isJoining}>Join</Button>
+                    </div>
+                  </div>
+                )) : !loadingRooms && (
+                  <div className="flex items-center justify-center h-full text-center p-8 text-muted-foreground">No rooms found.</div>
+                )}
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Password Required</DialogTitle>
+          <DialogDescription>
+            The room <span className="font-medium">“{selectedRoom?.name}”</span> is private. Please enter the password to join.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="grid gap-4 py-4">
+          <div className="grid grid-cols-4 items-center gap-4">
+            <Label htmlFor="password-input" className="text-right">Password</Label>
+            <Input id="password-input" type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="col-span-3" />
+          </div>
+        </div>
+        <Button onClick={() => selectedRoom && handleJoinRoom(selectedRoom, password)} disabled={isJoining}>
+          {isJoining ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> : null}
+          Join Room
+        </Button>
+      </DialogContent>
+    </Dialog>
+  );
+};
+  
+// --- MAIN LOBBY PAGE ---
+export default function LobbyPage() {
+  const [user, setUser] = useState<User | null>(null);
+  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
+  const [loading, setLoading] = useState(true);
+  const router = useRouter();
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+      if (currentUser) {
+        setUser(currentUser);
+        const userDocRef = doc(db, "users", currentUser.uid);
+        const userDocSnap = await getDoc(userDocRef);
+        if (userDocSnap.exists()) {
+          setUserProfile(userDocSnap.data() as UserProfile);
+        } else if (!currentUser.isAnonymous) {
+          const newProfile: UserProfile = { uid: currentUser.uid, email: currentUser.email, displayName: null, tag: null, createdAt: serverTimestamp() as unknown as Timestamp, friends: [] };
+          await setDoc(userDocRef, newProfile);
+          setUserProfile(newProfile);
+        }
+      } else { router.push('/'); }
+      setLoading(false);
+    });
+    return () => unsubscribe();
+  }, [router]);
+
+  const handleProfileCreated = (profile: UserProfile) => setUserProfile(profile);
+  const handleSignOut = async () => { await signOut(auth); router.push('/'); };
+
+  if (loading || (user && !user.isAnonymous && !userProfile)) {
+    return <div className="flex items-center justify-center min-h-screen bg-background dark"><LoaderCircle className="h-8 w-8 animate-spin text-primary" /></div>;
+  }
+  if (!user) return null;
+
+  const isProfileSetupComplete = user.isAnonymous || (userProfile && userProfile.displayName);
+
+  if (!isProfileSetupComplete) {
+    return <div className="dark font-sans bg-background text-foreground min-h-screen flex flex-col"><ProfileSetup user={user} onProfileCreated={handleProfileCreated} /></div>;
+  }
+
+  return (
+    <div className="dark font-sans bg-background text-foreground min-h-screen flex flex-col">
+      <div className="w-full max-w-screen-xl mx-auto p-4 sm:p-6 lg:p-8 flex flex-col flex-grow">
+        <header className="flex items-center justify-between pb-6 border-b mb-8">
+          <div className="flex items-center gap-2"><Gamepad2 className="h-7 w-7 text-primary" /><h1 className="text-2xl font-bold">CLUTCHPARTY</h1></div>
+          <div className="flex items-center gap-4">
+            <span className="hidden sm:inline text-sm">{user.isAnonymous ? "Anonymous" : `${userProfile?.displayName}${userProfile?.tag}`}</span>
+            <Button variant="ghost" size="sm" onClick={handleSignOut}><LogOut className="mr-2 h-4 w-4" />Sign Out</Button>
+          </div>
+        </header>
+        <main className="flex-grow flex flex-col lg:flex-row gap-8 min-h-0">
+          <aside className="w-full lg:w-1/3 lg:max-w-sm xl:max-w-md">
+            <CreateRoom user={user} userProfile={userProfile} />
+          </aside>
+          <section className="flex-grow flex flex-col min-w-0">
+            <Tabs defaultValue="public" className="flex flex-col flex-grow">
+              <TabsList>
+                <TabsTrigger value="public">Public Lobbies</TabsTrigger>
+                {!user.isAnonymous && <TabsTrigger value="friends">Friends</TabsTrigger>}
+              </TabsList>
+              <TabsContent value="public" className="flex-grow mt-4 min-h-0"><RoomList user={user} userProfile={userProfile} /></TabsContent>
+              {!user.isAnonymous && userProfile && (
+                <TabsContent value="friends" className="flex-grow mt-4 min-h-0 overflow-y-auto"><FriendsTab user={user} userProfile={userProfile} /></TabsContent>
+              )}
+            </Tabs>
+          </section>
+        </main>
+      </div>
+    </div>
+  );
+}
