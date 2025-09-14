@@ -152,7 +152,7 @@ export default function RoomPage() {
 
     useEffect(() => {
         if (!user?.uid || !roomId) return;
-        let animationFrameId: number; let speakingTimeout: NodeJS.Timeout; let localStream: MediaStream; let audioContext: AudioContext; let analyser: AnalyserNode; let source: MediaStreamAudioSourceNode; let dataArray: Uint8Array;
+        let animationFrameId: number; let localStream: MediaStream; let audioContext: AudioContext; let analyser: AnalyserNode; let source: MediaStreamAudioSourceNode; let dataArray: Uint8Array<ArrayBuffer>;
     
         const updateSpeakingStatus = (isSpeaking: boolean) => {
             if (!user || !roomId || !roomStateRef.current) return;
@@ -169,26 +169,54 @@ export default function RoomPage() {
                 audioStreamRef.current = localStream;
                 const currentPlayer = roomStateRef.current?.players.find(p => p.uid === user.uid);
                 localStream.getAudioTracks().forEach(track => { track.enabled = !!currentPlayer && !currentPlayer.isMuted; });
-                audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-                analyser = audioContext.createAnalyser(); analyser.minDecibels = -90; analyser.maxDecibels = -10; analyser.smoothingTimeConstant = 0.85;
-                source = audioContext.createMediaStreamSource(localStream); source.connect(analyser); dataArray = new Uint8Array(analyser.frequencyBinCount);
+                
+                // Create audio context with fallback
+                const AudioCtx = window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+                if (!AudioCtx) {
+                    throw new Error("AudioContext not supported");
+                }
+                
+                audioContext = new AudioCtx();
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 1024; // Set smaller FFT size for better performance
+                analyser.minDecibels = -90;
+                analyser.maxDecibels = -10;
+                analyser.smoothingTimeConstant = 0.85;
+
+                source = audioContext.createMediaStreamSource(localStream);
+                source.connect(analyser);
+                
+                // Create the data array with the correct size
+                dataArray = new Uint8Array(analyser.frequencyBinCount) as Uint8Array<ArrayBuffer>;
+
                 const detectSpeaking = () => {
-                    analyser.getByteFrequencyData(dataArray);
-                    let sum = 0; for (const amplitude of dataArray) { sum += amplitude * amplitude; }
-                    const volume = Math.sqrt(sum / dataArray.length);
-                    const speaking = volume > 10; // Adjusted threshold
-                    if (speaking !== isSpeakingRef.current) {
-                        isSpeakingRef.current = speaking;
-                        updateSpeakingStatus(speaking);
+                    try {
+                        if (analyser && dataArray) {
+                            analyser.getByteFrequencyData(dataArray as Uint8Array<ArrayBuffer>);
+                            const values = dataArray.reduce((sum, value) => sum + value, 0);
+                            const average = values / dataArray.length;
+                            const speaking = average > 15; // Adjusted threshold
+
+                            if (speaking !== isSpeakingRef.current) {
+                                isSpeakingRef.current = speaking;
+                                updateSpeakingStatus(speaking);
+                            }
+                        }
+                    } catch (err) {
+                        console.error("Audio analysis error:", err);
                     }
                     animationFrameId = requestAnimationFrame(detectSpeaking);
                 };
+
                 detectSpeaking();
-            } catch (err) { console.error("Mic access error:", err); toast.error("Could not access microphone."); }
+            } catch (err) {
+                console.error("Mic access error:", err);
+                toast.error("Could not access microphone.");
+            }
         };
         setupMic();
-        return () => { cancelAnimationFrame(animationFrameId); clearTimeout(speakingTimeout); localStream?.getTracks().forEach(track => track.stop()); audioContext?.close().catch(() => {}); };
-    }, [user?.uid, roomId]);
+        return () => { cancelAnimationFrame(animationFrameId); localStream?.getTracks().forEach(track => track.stop()); audioContext?.close().catch(() => {}); };
+    }, [user, user?.uid, roomId]);
 
     useEffect(() => {
         chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -355,7 +383,7 @@ export default function RoomPage() {
             );
         } else {
             return (
-                <div key={`empty-${i}`} className="min-h-52 bg-zinc-800/50 border-2 border-dashed border-zinc-700 rounded-lg p-3 flex flex-col items-center justify-center text-zinc-500">
+                <div key={`empty-${i}`} className="bg-zinc-800/50 border-2 border-dashed border-zinc-700 rounded-lg p-3 flex flex-col items-center justify-center text-zinc-500">
                     <Users className="w-8 h-8 mb-2"/><p className="text-xs">Empty Slot</p>
                 </div>
             );

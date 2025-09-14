@@ -154,7 +154,7 @@ const googleProvider = new GoogleAuthProvider();
 
 const toMessage = (err: unknown): string => {
   if (err && typeof err === 'object' && 'message' in err) {
-    const message = (err as any).message || "An unknown error occurred.";
+    const message = (err as { message?: string }).message || "An unknown error occurred.";
     // Clean up Firebase error codes
     return message.replace(/Firebase: |\(auth\/.*\)\.?/g, '').trim();
   }
