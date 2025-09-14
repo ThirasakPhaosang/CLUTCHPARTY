@@ -124,6 +124,11 @@ export default function RoomPage() {
     const peerConnectionsRef = useRef<{ [key: string]: RTCPeerConnection }>({});
     const [remoteStreams, setRemoteStreams] = useState<{ [key: string]: MediaStream }>({});
     const iceCandidateQueues = useRef<{ [key: string]: RTCIceCandidateInit[] }>({});
+    const processedStreamRef = useRef<MediaStream | null>(null);
+    const micGainRef = useRef<GainNode | null>(null);
+    const [micGain, setMicGain] = useState<number>(1);
+    const [masterVolume, setMasterVolume] = useState<number>(1);
+    const [streamReady, setStreamReady] = useState<boolean>(false);
     
     const localMonitorRef = useRef<HTMLAudioElement | null>(null);
     const [monitorOn, setMonitorOn] = useState<boolean>(false);
@@ -187,13 +192,16 @@ export default function RoomPage() {
                 // Mic monitor (optional)
                 if (monitorOn && localMonitorRef.current) {
                     const a = localMonitorRef.current;
-                    a.srcObject = localStream;
+                    a.srcObject = audioStreamRef.current;
                     a.muted = false;
                     a.volume = 1.0;
                     a.play().catch(() => {});
                 }
 
                 localStream.getAudioTracks().forEach(track => { track.enabled = !!currentPlayer && !currentPlayer.isMuted; });
+                if (audioStreamRef.current) {
+                    audioStreamRef.current.getAudioTracks().forEach(track => { track.enabled = !!currentPlayer && !currentPlayer.isMuted; });
+                }
                 
                 interface AudioContextWindow extends Window { webkitAudioContext?: typeof AudioContext }
                 const StdAudioContext: typeof AudioContext | undefined = (window as Window & typeof globalThis).AudioContext;
@@ -208,8 +216,18 @@ export default function RoomPage() {
                 analyser.maxDecibels = -10;
                 analyser.smoothingTimeConstant = 0.85;
 
+                const gainNode = audioContext.createGain();
+                micGainRef.current = gainNode;
+                gainNode.gain.value = micGain;
+
+                const dest = audioContext.createMediaStreamDestination();
+                processedStreamRef.current = dest.stream;
+                audioStreamRef.current = dest.stream;
+
                 source = audioContext.createMediaStreamSource(localStream);
-                source.connect(analyser);
+                source.connect(gainNode);
+                gainNode.connect(analyser);
+                gainNode.connect(dest);
                 dataArray = new Uint8Array(analyser.frequencyBinCount) as Uint8Array<ArrayBuffer>;
 
                 const detectSpeaking = () => {
@@ -225,6 +243,7 @@ export default function RoomPage() {
                 };
 
                 detectSpeaking();
+                setStreamReady(true);
             } catch (err) {
                 console.error("Mic access error:", err);
                 toast.error("Could not access microphone.");
@@ -232,9 +251,14 @@ export default function RoomPage() {
         };
         setupMic();
         return () => { cancelAnimationFrame(animationFrameId); localStream?.getTracks().forEach(track => track.stop()); audioContext?.close().catch(() => {}); };
-    }, [user?.uid, roomId, monitorOn]);
+    } , [user?.uid, roomId, monitorOn]);
 
-    // WebRTC connection management
+    useEffect(() => {
+        if (micGainRef.current) {
+            micGainRef.current.gain.value = micGain;
+        }
+    }, [micGain]);
+// WebRTC connection management
 useEffect(() => {
     if (!user || !roomId || !audioStreamRef.current || !room?.players) return;
 
@@ -382,7 +406,7 @@ useEffect(() => {
             a.pause();
             a.srcObject = null
         }
-    }, [monitorOn, audioStreamRef.current]);
+    }, [monitorOn, streamReady]);
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -694,7 +718,15 @@ useEffect(() => {
                 <Button variant="destructive" onClick={handleLeaveRoom}>Leave Room</Button>
                 <div className="flex items-center gap-2">
                     
-                    <Button variant="outline" onClick={() => setMonitorOn(v => !v)}>
+                                        <div className="flex items-center gap-2 pr-2">
+                        <span className="text-xs text-zinc-400">Mic Gain</span>
+                        <input type="range" min="0" max="2" step="0.01" value={micGain} onChange={e => setMicGain(parseFloat(e.target.value))} />
+                    </div>
+                    <div className="flex items-center gap-2 pr-2">
+                        <span className="text-xs text-zinc-400">Output Vol</span>
+                        <input type="range" min="0" max="1" step="0.01" value={masterVolume} onChange={e => setMasterVolume(parseFloat(e.target.value))} />
+                    </div>
+<Button variant="outline" onClick={() => setMonitorOn(v => !v)}>
                         {monitorOn ? 'Mic Monitor: On' : 'Mic Monitor: Off'}
                     </Button>
 {isHost && (
