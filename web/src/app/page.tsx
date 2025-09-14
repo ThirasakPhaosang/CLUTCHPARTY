@@ -7,7 +7,6 @@
 import React, { useState, useEffect, FC, forwardRef, HTMLAttributes, InputHTMLAttributes, ButtonHTMLAttributes, LabelHTMLAttributes } from 'react';
 import { useRouter } from 'next/navigation';
 import { auth, db } from '../lib/firebase';
-// Fix: Import `updateDoc` from 'firebase/firestore' to resolve the 'Cannot find name' error.
 import { doc, setDoc, serverTimestamp, getDoc, updateDoc } from 'firebase/firestore';
 import { toast } from "sonner";
 
@@ -154,7 +153,7 @@ const googleProvider = new GoogleAuthProvider();
 
 const toMessage = (err: unknown): string => {
   if (err && typeof err === 'object' && 'message' in err) {
-    const message = (err as { message?: string }).message || "An unknown error occurred.";
+    const message = (err as { message: string }).message || "An unknown error occurred.";
     // Clean up Firebase error codes
     return message.replace(/Firebase: |\(auth\/.*\)\.?/g, '').trim();
   }
@@ -167,15 +166,18 @@ const createOrUpdateUserProfile = async (user: User) => {
 
     if (!userDocSnap.exists()) {
         const tag = `#${String(Math.floor(1000 + Math.random() * 9000))}`;
+        const isNewEmailUser = !user.isAnonymous && !user.displayName;
+        
         await setDoc(userDocRef, {
             uid: user.uid,
             email: user.email,
             displayName: user.isAnonymous ? 'Guest' : user.displayName,
-            tag: user.isAnonymous || user.displayName ? tag : null, // Give anon users and google users a tag
+            tag: user.isAnonymous || user.displayName ? tag : null,
             createdAt: serverTimestamp(),
             friends: [],
             status: 'online',
-            lastSeen: serverTimestamp()
+            lastSeen: serverTimestamp(),
+            profileInitialized: !isNewEmailUser, // Set to false only for new email users
         });
     } else {
         await updateDoc(userDocRef, {

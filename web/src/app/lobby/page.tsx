@@ -20,7 +20,7 @@ import * as TabsPrimitive from "@radix-ui/react-tabs";
 import { cva, type VariantProps } from "class-variance-authority";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
-import { LogOut, LoaderCircle, Users, Lock, Search, PlusCircle, UsersRound, Gamepad2, UserPlus, Check, X, Hourglass, MailQuestion, Send, Bell } from "lucide-react";
+import { LogOut, LoaderCircle, Users, Lock, Search, PlusCircle, UsersRound, Gamepad2, UserPlus, Check, X, Hourglass, MailQuestion, Send, Bell, Pencil } from "lucide-react";
 
 // --- TYPES ---
 interface UserProfile {
@@ -32,6 +32,7 @@ interface UserProfile {
   friends: string[];
   status?: 'online' | 'offline';
   lastSeen?: Timestamp;
+  profileInitialized?: boolean;
 }
 
 interface FriendRequest {
@@ -59,9 +60,11 @@ interface GameRoom {
     isReady: boolean;
     isMuted: boolean;
     isSpeaking: boolean;
+    isLoaded: boolean;
   }[];
   playerIds: string[];
   createdAt: Timestamp;
+  status: 'waiting' | 'loading' | 'playing' | 'finished';
 }
 
 interface GameInvite {
@@ -215,7 +218,7 @@ const ProfileSetup: FC<{ user: User; onProfileCreated: (profile: UserProfile) =>
     setIsSaving(true);
     try {
       const userDocRef = doc(db, "users", user.uid);
-      await updateDoc(userDocRef, { displayName, tag });
+      await updateDoc(userDocRef, { displayName, tag, profileInitialized: true });
       const updatedDoc = await getDoc(userDocRef);
       onProfileCreated(updatedDoc.data() as UserProfile);
     } catch (e) {
@@ -532,6 +535,7 @@ const InvitationsTab: FC<{ user: User }> = ({ user }) => {
                 isReady: false,
                 isMuted: true,
                 isSpeaking: false,
+                isLoaded: false,
             };
 
             await updateDoc(roomRef, { 
@@ -619,6 +623,7 @@ const CreateRoom: FC<{ user: User | null, userProfile: UserProfile | null }> = (
           isReady: false,
           isMuted: true,
           isSpeaking: false,
+          isLoaded: false,
         }],
         playerIds: [user.uid],
         createdAt: serverTimestamp(),
@@ -680,7 +685,7 @@ const RoomList: FC<{ user: User | null, userProfile: UserProfile | null }> = ({ 
   const [isJoining, setIsJoining] = useState(false);
   
   useEffect(() => {
-    const q = query(collection(db, "rooms"));
+    const q = query(collection(db, "rooms"), where("status", "==", "waiting"));
     const unsubscribe = onSnapshot(q, (querySnapshot) => {
       const roomsData: GameRoom[] = [];
       querySnapshot.forEach((doc) => {
@@ -725,6 +730,7 @@ const RoomList: FC<{ user: User | null, userProfile: UserProfile | null }> = ({ 
           isReady: false,
           isMuted: true,
           isSpeaking: false,
+          isLoaded: false,
         };
 
         transaction.update(roomRef, { 
@@ -798,58 +804,134 @@ const RoomList: FC<{ user: User | null, userProfile: UserProfile | null }> = ({ 
     </Dialog>
   );
 };
+
+const EditProfileDialog: FC<{ user: User; profile: UserProfile; open: boolean; onOpenChange: (open: boolean) => void; }> = ({ user, profile, open, onOpenChange }) => {
+    const [displayName, setDisplayName] = useState(profile.displayName || "");
+    const [isSaving, setIsSaving] = useState(false);
+
+    const handleSave = async () => {
+        if (!displayName.trim() || displayName.length < 3) {
+            toast.error("Display name must be at least 3 characters.");
+            return;
+        }
+        setIsSaving(true);
+        try {
+            await updateDoc(doc(db, "users", user.uid), { displayName });
+            toast.success("Display name updated!");
+            onOpenChange(false);
+        } catch (error) {
+            toast.error("Failed to update display name.");
+            console.error(error);
+        } finally {
+            setIsSaving(false);
+        }
+    };
+    
+    return (
+        <Dialog open={open} onOpenChange={onOpenChange}>
+            <DialogContent>
+                <DialogHeader>
+                    <DialogTitle>Edit Profile</DialogTitle>
+                    <DialogDescription>Change your display name here. Your tag will remain the same.</DialogDescription>
+                </DialogHeader>
+                <div className="grid gap-4 py-4">
+                    <Label htmlFor="displayNameEdit">Display Name</Label>
+                    <div className="flex items-center gap-2">
+                         <Input id="displayNameEdit" value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+                         <span className="text-muted-foreground font-semibold">{profile.tag}</span>
+                    </div>
+                </div>
+                <Button onClick={handleSave} disabled={isSaving}>
+                    {isSaving && <LoaderCircle className="mr-2 h-4 w-4 animate-spin"/>}
+                    Save Changes
+                </Button>
+            </DialogContent>
+        </Dialog>
+    )
+}
   
 // --- MAIN LOBBY PAGE ---
 export default function LobbyPage() {
   const [user, setUser] = useState<User | null>(null);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
+  const [isEditProfileOpen, setEditProfileOpen] = useState(false);
   const router = useRouter();
 
+  // Fix: Correctly handle Firestore listener unsubscription to prevent memory leaks and fix scoping errors.
   useEffect(() => {
-    if (user) {
-        const userDocRef = doc(db, "users", user.uid);
-        const updateUserStatus = (status: 'online' | 'offline') => {
-            updateDoc(userDocRef, { status, lastSeen: serverTimestamp() }).catch(() => {});
-        };
+    const updateUserStatus = async (uid: string, status: 'online' | 'offline') => {
+        const userDocRef = doc(db, "users", uid);
+        try {
+            await updateDoc(userDocRef, { status, lastSeen: serverTimestamp() });
+        } catch (error) {
+            // This might fail if the user is new and the doc doesn't exist yet. It's fine.
+        }
+    };
 
-        updateUserStatus('online');
-        const handleBeforeUnload = () => updateUserStatus('offline');
-        window.addEventListener('beforeunload', handleBeforeUnload);
+    let unsubProfile: (() => void) | undefined;
 
-        return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-    }
-  }, [user]);
-
-  useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+      if (unsubProfile) {
+        unsubProfile();
+        unsubProfile = undefined;
+      }
+        
       if (currentUser) {
         setUser(currentUser);
         const userDocRef = doc(db, "users", currentUser.uid);
+        
+        unsubProfile = onSnapshot(userDocRef, (docSnap) => {
+            if (docSnap.exists()) {
+                setUserProfile(docSnap.data() as UserProfile);
+            }
+        });
+
+        // This handles initial status setting after profile is confirmed to exist or created.
         const userDocSnap = await getDoc(userDocRef);
         if (userDocSnap.exists()) {
-          const profile = userDocSnap.data() as UserProfile;
-          await updateDoc(userDocRef, { status: 'online', lastSeen: serverTimestamp() });
-          setUserProfile(profile);
+          setUserProfile(userDocSnap.data() as UserProfile);
+          await updateUserStatus(currentUser.uid, 'online');
         } else {
             const tag = `#${String(Math.floor(1000 + Math.random() * 9000))}`;
+            const isNewEmailUser = !currentUser.isAnonymous && !currentUser.displayName;
             const newProfile: UserProfile = {
                 uid: currentUser.uid,
                 email: currentUser.email,
-                displayName: currentUser.isAnonymous ? `Guest` : null,
-                tag: currentUser.isAnonymous ? tag : null,
+                displayName: currentUser.isAnonymous ? `Guest` : currentUser.displayName,
+                tag: currentUser.isAnonymous || currentUser.displayName ? tag : null,
                 createdAt: serverTimestamp() as Timestamp,
                 friends: [],
                 status: 'online',
-                lastSeen: serverTimestamp() as Timestamp
+                lastSeen: serverTimestamp() as Timestamp,
+                profileInitialized: !isNewEmailUser,
             };
             await setDoc(userDocRef, newProfile);
             setUserProfile(newProfile);
         }
-      } else { router.push('/'); }
+      } else { 
+          router.push('/'); 
+      }
       setLoading(false);
     });
-    return () => unsubscribe();
+
+    const handleBeforeUnload = () => {
+        if (auth.currentUser) {
+            updateUserStatus(auth.currentUser.uid, 'offline');
+        }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    return () => {
+        unsubscribe();
+        if (unsubProfile) {
+          unsubProfile();
+        }
+        window.removeEventListener('beforeunload', handleBeforeUnload);
+        if (auth.currentUser) {
+             updateUserStatus(auth.currentUser.uid, 'offline');
+        }
+    };
   }, [router]);
 
   const handleProfileCreated = (profile: UserProfile) => setUserProfile(profile);
@@ -861,11 +943,11 @@ export default function LobbyPage() {
     router.push('/'); 
   };
 
-  if (loading || !user) {
+  if (loading || !user || !userProfile) {
     return <div className="flex items-center justify-center min-h-screen bg-background dark"><LoaderCircle className="h-8 w-8 animate-spin text-primary" /></div>;
   }
   
-  if (!user.isAnonymous && !(userProfile?.displayName)) {
+  if (!user.isAnonymous && !userProfile.profileInitialized) {
     return <div className="dark font-sans bg-background text-foreground min-h-screen flex flex-col"><ProfileSetup user={user} onProfileCreated={handleProfileCreated} /></div>;
   }
 
@@ -874,8 +956,15 @@ export default function LobbyPage() {
       <div className="w-full max-w-screen-xl mx-auto p-4 sm:p-6 lg:p-8 flex flex-col flex-grow">
         <header className="flex items-center justify-between pb-6 border-b mb-8">
           <div className="flex items-center gap-2"><Gamepad2 className="h-7 w-7 text-primary" /><h1 className="text-2xl font-bold">CLUTCHPARTY</h1></div>
-          <div className="flex items-center gap-4">
-            <span className="hidden sm:inline text-sm">{userProfile?.displayName}{userProfile?.tag}</span>
+          <div className="flex items-center gap-2">
+            {!user.isAnonymous && (
+                 <div className="flex items-center gap-1">
+                    <span className="hidden sm:inline text-sm">{userProfile.displayName}{userProfile.tag}</span>
+                    <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setEditProfileOpen(true)}>
+                        <Pencil className="h-4 w-4" />
+                    </Button>
+                 </div>
+            )}
             <Button variant="ghost" size="sm" onClick={handleSignOut}><LogOut className="mr-2 h-4 w-4" />Sign Out</Button>
           </div>
         </header>
@@ -901,6 +990,7 @@ export default function LobbyPage() {
           </section>
         </main>
       </div>
+      {!user.isAnonymous && <EditProfileDialog user={user} profile={userProfile} open={isEditProfileOpen} onOpenChange={setEditProfileOpen}/>}
     </div>
   );
 }

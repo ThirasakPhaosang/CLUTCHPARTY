@@ -25,6 +25,7 @@ interface Player {
     isReady: boolean;
     isMuted: boolean;
     isSpeaking: boolean;
+    isLoaded: boolean;
 }
 
 interface UserProfile {
@@ -54,6 +55,7 @@ interface GameRoom {
     playerIds: string[];
     chatMessages: ChatMessage[];
     createdAt: Timestamp;
+    status: 'waiting' | 'loading' | 'playing' | 'finished';
 }
 
 // --- UTILS & COMPONENTS ---
@@ -408,6 +410,12 @@ useEffect(() => {
         return () => unsubscribe();
     }, [userProfile, room?.playerIds]);
 
+    useEffect(() => {
+        if (room?.status === 'loading') {
+            router.push(`/room/${roomId}/game`);
+        }
+    }, [room?.status, roomId, router]);
+
     const performLeaveRoom = async () => {
         if (!user || !roomId) return;
         const roomRef = doc(db, "rooms", roomId);
@@ -553,10 +561,20 @@ useEffect(() => {
         }
     };
 
-    const handleStartGame = () => {
+    const handleStartGame = async () => {
         if(!room) return;
-        if (room.players.every(p => p.isReady)) { toast.success("Starting game!"); }
-        else { toast.error("Not all players are ready."); }
+        if (room.players.every(p => p.isReady)) {
+            toast.info("Starting game...");
+            try {
+                await updateDoc(doc(db, "rooms", roomId), { status: 'loading' });
+            } catch (error) {
+                console.error("Error starting game:", error);
+                toast.error("Could not start the game.");
+            }
+        }
+        else { 
+            toast.error("Not all players are ready."); 
+        }
     };
 
     if (loading || !room || !user) {
