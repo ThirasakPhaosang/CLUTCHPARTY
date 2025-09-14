@@ -144,6 +144,30 @@ export default function GamePage() {
         router.push('/lobby');
     };
 
+    // Handle graceful disconnect
+    useEffect(() => {
+        const handleBeforeUnload = () => {
+            if (!user || !roomId) return;
+            const roomRef = doc(db, "rooms", roomId);
+            // This is a fire-and-forget operation on page close.
+            runTransaction(db, async (transaction) => {
+                const roomDoc = await transaction.get(roomRef);
+                if (!roomDoc.exists()) return;
+                const currentPlayers = roomDoc.data().players as Player[];
+                const updatedPlayers = currentPlayers.map(p =>
+                    p.uid === user.uid ? { ...p, status: 'disconnected' } : p
+                );
+                transaction.update(roomRef, { players: updatedPlayers });
+            }).catch(console.error);
+        };
+        
+        window.addEventListener('beforeunload', handleBeforeUnload);
+        
+        return () => {
+            window.removeEventListener('beforeunload', handleBeforeUnload);
+        };
+    }, [user, roomId]);
+
 
     if (!room || isLoading) {
         return (

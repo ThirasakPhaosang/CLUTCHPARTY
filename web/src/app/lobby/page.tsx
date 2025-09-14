@@ -61,6 +61,7 @@ interface GameRoom {
     isMuted: boolean;
     isSpeaking: boolean;
     isLoaded: boolean;
+    status: 'connected' | 'disconnected';
   }[];
   playerIds: string[];
   createdAt: Timestamp;
@@ -536,6 +537,7 @@ const InvitationsTab: FC<{ user: User }> = ({ user }) => {
                 isMuted: true,
                 isSpeaking: false,
                 isLoaded: false,
+                status: 'connected' as const,
             };
 
             await updateDoc(roomRef, { 
@@ -624,6 +626,7 @@ const CreateRoom: FC<{ user: User | null, userProfile: UserProfile | null }> = (
           isMuted: true,
           isSpeaking: false,
           isLoaded: false,
+          status: 'connected',
         }],
         playerIds: [user.uid],
         createdAt: serverTimestamp(),
@@ -731,6 +734,7 @@ const RoomList: FC<{ user: User | null, userProfile: UserProfile | null }> = ({ 
           isMuted: true,
           isSpeaking: false,
           isLoaded: false,
+          status: 'connected' as const,
         };
 
         transaction.update(roomRef, { 

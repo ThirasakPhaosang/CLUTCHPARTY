@@ -26,6 +26,7 @@ interface Player {
     isMuted: boolean;
     isSpeaking: boolean;
     isLoaded: boolean;
+    status: 'connected' | 'disconnected';
 }
 
 interface UserProfile {
@@ -425,8 +426,8 @@ useEffect(() => {
             router.push(`/room/${roomId}/game`);
         }
     }, [room?.status, roomId, router]);
-
-    const performLeaveRoom = async () => {
+    
+    const handleLeaveRoom = async () => {
         if (!user || !roomId) return;
         const roomRef = doc(db, "rooms", roomId);
         try {
@@ -454,19 +455,8 @@ useEffect(() => {
         } catch (error) { 
             console.error("Error performing leave room operation: ", error); 
         }
-    };
-    
-    const handleLeaveRoom = async () => {
-        await performLeaveRoom();
         router.push('/lobby');
     };
-
-    useEffect(() => {
-        const onBeforeUnload = () => { performLeaveRoom(); };
-        window.addEventListener('beforeunload', onBeforeUnload);
-        return () => window.removeEventListener('beforeunload', onBeforeUnload);
-    }, [user, roomId]); // Re-bind if user or room changes
-
     
     const handleToggleReady = async () => {
         if (!user || !room) return;
@@ -652,22 +642,35 @@ useEffect(() => {
         const unsubscribe = onSnapshot(q, (snapshot) => {
             snapshot.forEach(async (playerDoc) => {
                 const playerData = playerDoc.data() as UserProfile;
-                if (playerData.status === 'offline' && roomStateRef.current?.playerIds.includes(playerData.uid)) {
+                const GRACE_PERIOD_MS = 15000; // 15 seconds
+    
+                if (
+                    playerData.status === 'offline' &&
+                    roomStateRef.current?.playerIds.includes(playerData.uid) &&
+                    playerData.lastSeen &&
+                    (Date.now() - playerData.lastSeen.toDate().getTime() > GRACE_PERIOD_MS)
+                ) {
                     const roomRef = doc(db, "rooms", roomId);
-                    await runTransaction(db, async (transaction) => {
-                        const roomDoc = await transaction.get(roomRef);
-                        if (!roomDoc.exists()) return;
+                    try {
+                        await runTransaction(db, async (transaction) => {
+                            const roomDoc = await transaction.get(roomRef);
+                            if (!roomDoc.exists()) return;
     
-                        const currentPlayers = roomDoc.data().players as Player[];
-                        const playerToRemove = currentPlayers.find(p => p.uid === playerData.uid);
-                        if (!playerToRemove) return;
-
-                        const newPlayers = currentPlayers.filter(p => p.uid !== playerData.uid);
-                        const newPlayerIds = roomDoc.data().playerIds.filter((id: string) => id !== playerData.uid);
+                            const currentRoomData = roomDoc.data() as GameRoom;
+                            if (!currentRoomData.playerIds.includes(playerData.uid)) return;
     
-                        transaction.update(roomRef, { players: newPlayers, playerIds: newPlayerIds });
-                        toast.info(`${playerToRemove.displayName} left (disconnected).`);
-                    }).catch(err => console.error("Failed to remove offline player:", err));
+                            const playerToRemove = currentRoomData.players.find(p => p.uid === playerData.uid);
+                            if (!playerToRemove) return;
+    
+                            const newPlayers = currentRoomData.players.filter(p => p.uid !== playerData.uid);
+                            const newPlayerIds = currentRoomData.playerIds.filter((id: string) => id !== playerData.uid);
+    
+                            transaction.update(roomRef, { players: newPlayers, playerIds: newPlayerIds });
+                            toast.info(`${playerToRemove.displayName} left (disconnected).`);
+                        });
+                    } catch(err) {
+                        console.error("Failed to remove offline player:", err);
+                    }
                 }
             });
         });
