@@ -4,7 +4,7 @@
 */
 "use client";
 
-import React, { useState, useEffect, forwardRef, InputHTMLAttributes, ButtonHTMLAttributes, useRef, HTMLAttributes } from 'react';
+import React, { useState, useEffect, forwardRef, InputHTMLAttributes, ButtonHTMLAttributes, useRef, HTMLAttributes, TextareaHTMLAttributes } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import { auth, db } from '../../../lib/firebase';
 import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
@@ -82,6 +82,19 @@ Button.displayName = "Button";
 
 const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(({ className, type, ...props }, ref) => <input type={type} className={cn("flex h-10 w-full rounded-md border border-input bg-zinc-800 px-3 py-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring", className)} ref={ref} {...props} />);
 Input.displayName = "Input";
+
+const Textarea = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<HTMLTextAreaElement>>(({ className, ...props }, ref) => (
+    <textarea
+        className={cn(
+            "flex w-full rounded-md border border-input bg-zinc-800 px-3 py-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring resize-none",
+            "min-h-[40px] max-h-32 overflow-y-auto",
+            className
+        )}
+        ref={ref}
+        {...props}
+    />
+));
+Textarea.displayName = "Textarea";
 
 const Dialog = DialogPrimitive.Root;
 const DialogPortal = DialogPrimitive.Portal;
@@ -844,20 +857,30 @@ useEffect(() => {
                        <div ref={chatEndRef} />
                     </div>
                     <div className="flex gap-2 flex-shrink-0">
-                        <Input placeholder="Type a message..." value={chatMessage} onChange={e => setChatMessage(e.target.value)} onKeyPress={e => e.key === 'Enter' && handleSendMessage()}/>
+                        <Textarea 
+                            placeholder="Type a message..." 
+                            value={chatMessage} 
+                            onChange={e => setChatMessage(e.target.value)} 
+                            onKeyDown={e => {
+                                if (e.key === 'Enter' && !e.shiftKey) {
+                                    e.preventDefault();
+                                    handleSendMessage();
+                                }
+                            }}
+                            rows={1}
+                        />
                         <Button onClick={handleSendMessage} size="icon"><Send className="w-4 h-4"/></Button>
                     </div>
                 </aside>
             </main>
 
-            <footer className="flex-shrink-0 bg-black/50 backdrop-blur-sm p-3 rounded-md mt-4 flex justify-between items-center">
+            <footer className="flex-shrink-0 bg-black/50 backdrop-blur-sm p-3 rounded-md mt-4 flex flex-wrap justify-between items-center gap-2">
                 <Button variant="destructive" onClick={handleLeaveRoom}>Leave Room</Button>
-                <div className="flex items-center gap-2">
-                    
+                <div className="flex items-center gap-2 flex-wrap justify-end">
                     <Button variant="outline" onClick={() => setMonitorOn(v => !v)}>
                         {monitorOn ? 'Mic Monitor: On' : 'Mic Monitor: Off'}
                     </Button>
-{isHost && (
+                    {isHost && (
                         <>
                             <Button variant="secondary" onClick={() => setInviteDialogOpen(true)}>Invite Friends</Button>
                             <Button onClick={handleStartGame} className="bg-green-600 hover:bg-green-700">Start Game</Button>

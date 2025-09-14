@@ -770,7 +770,7 @@ const RoomList: FC<{ user: User | null, userProfile: UserProfile | null }> = ({ 
               <div className="p-1">
                 {loadingRooms && <div className="flex items-center justify-center p-8"><LoaderCircle className="h-6 w-6 animate-spin"/></div>}
                 {!loadingRooms && filteredRooms.length > 0 ? filteredRooms.map((room) => (
-                  <div key={room.id} className="flex items-center justify-between p-3 rounded-md hover:bg-accent">
+                  <div key={room.id} className="flex flex-wrap items-center justify-between gap-y-2 gap-x-4 p-3 rounded-md hover:bg-accent">
                     <div className="flex items-center gap-3">
                       {room.hasPassword ? <Lock className="h-4 w-4 text-muted-foreground" /> : <div className="w-4" />}
                       <div><p className="font-semibold">{room.name}</p><p className="text-xs text-muted-foreground">Hosted by {room.host.displayName}</p></div>
