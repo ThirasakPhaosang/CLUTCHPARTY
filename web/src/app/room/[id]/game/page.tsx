@@ -310,16 +310,20 @@ useEffect(() => {
             audioStreamRef.current?.getTracks().forEach(track => pc.addTrack(track, audioStreamRef.current!));
             pc.ontrack = (event) => setRemoteStreams(prev => ({ ...prev, [peerId]: event.streams[0] }));
             pc.onicecandidate = e => e.candidate && addDoc(signalingCollection, { from: myId, to: peerId, signal: { type: 'candidate', candidate: e.candidate.toJSON() } });
+            // Negotiation: only the chosen initiator proactively creates offers to reduce glare
             if (initiator) {
-                pc.onnegotiationneeded = async () => {
-                    try {
-                        if (pc.signalingState === 'stable') {
-                            const offer = await pc.createOffer();
-                            await pc.setLocalDescription(offer);
-                            await addDoc(signalingCollection, { from: myId, to: peerId, signal: { type: 'offer', sdp: pc.localDescription?.sdp } });
-                        }
-                    } catch { }
-                };
+              pc.onnegotiationneeded = async () => {
+                if (pc.signalingState !== 'stable') return;
+                try {
+                  makingOfferRef.current[peerId] = true;
+                  await pc.setLocalDescription(await pc.createOffer());
+                  await addDoc(signalingCollection, { from: myId, to: peerId, signal: { type: 'offer', sdp: pc.localDescription?.sdp } });
+                } catch (e) {
+                  // ignore
+                } finally {
+                  makingOfferRef.current[peerId] = false;
+                }
+              };
             }
             return pc;
         };
@@ -336,19 +340,30 @@ useEffect(() => {
                     if (!pc) continue;
                     try {
                         if (signal.type === 'offer') {
-                            await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: signal.sdp }));
-                            const queue = iceCandidateQueues.current[fromId] || [];
-                            for(const c of queue) { await pc.addIceCandidate(new RTCIceCandidate(c)); }
-                            iceCandidateQueues.current[fromId] = [];
-                            const answer = await pc.createAnswer();
-                            await pc.setLocalDescription(answer);
-                            await addDoc(signalingCollection, { from: myId, to: fromId, signal: { type: 'answer', sdp: pc.localDescription?.sdp } });
+                            // Perfect negotiation-style glare handling
+                            const polite = myId > fromId;
+                            const offerCollision = makingOfferRef.current[fromId] || pc.signalingState !== 'stable';
+                            if (offerCollision && !polite) {
+                              // Ignore the offer; let the other side win
+                            } else {
+                              await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: signal.sdp }));
+                              const queue = iceCandidateQueues.current[fromId] || [];
+                              for (const c of queue) { await pc.addIceCandidate(new RTCIceCandidate(c)); }
+                              iceCandidateQueues.current[fromId] = [];
+                              const answer = await pc.createAnswer();
+                              await pc.setLocalDescription(answer);
+                              await addDoc(signalingCollection, { from: myId, to: fromId, signal: { type: 'answer', sdp: pc.localDescription?.sdp } });
+                            }
                         } else if (signal.type === 'answer') {
                             if (pc.signalingState === 'have-local-offer') {
-                                await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: signal.sdp }));
-                                const queue = iceCandidateQueues.current[fromId] || [];
-                                for(const c of queue) { await pc.addIceCandidate(new RTCIceCandidate(c)); }
-                                iceCandidateQueues.current[fromId] = [];
+                                try {
+                                  await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: signal.sdp }));
+                                  const queue = iceCandidateQueues.current[fromId] || [];
+                                  for (const c of queue) { await pc.addIceCandidate(new RTCIceCandidate(c)); }
+                                  iceCandidateQueues.current[fromId] = [];
+                                } catch (e) {
+                                  // Ignore InvalidStateError if state already stabilized
+                                }
                             }
                         } else if (signal.candidate) {
                            if (pc.remoteDescription) await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
@@ -484,7 +499,21 @@ useEffect(() => {
         <div className="w-screen h-screen bg-zinc-900 relative font-sans text-white overflow-hidden">
             <GameBoard room={room} speakingPeers={speakingPeers} />
              {Object.entries(remoteStreams).map(([uid, stream]) => (
-                 <audio key={uid} ref={audioEl => { if (audioEl && audioEl.srcObject !== stream) { audioEl.srcObject = stream; } }} autoPlay playsInline />
+                 <audio
+                   key={uid}
+                   data-peer-audio
+                   autoPlay
+                   playsInline
+                   // ensure not muted and try to play on canplay for autoplay policies
+                   muted={false}
+                   ref={audioEl => {
+                     if (audioEl && audioEl.srcObject !== stream) {
+                       audioEl.srcObject = stream;
+                       audioEl.play?.().catch(() => {});
+                     }
+                   }}
+                   onCanPlay={e => { try { (e.currentTarget as HTMLAudioElement).play(); } catch {} }}
+                 />
              ))}
 
             {/* Leaderboard UI */}
