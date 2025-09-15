@@ -83,6 +83,9 @@ export default function GamePage() {
     // removed unused isSpeakingRef
     const peerConnectionsRef = useRef<{ [key: string]: RTCPeerConnection }>({});
     const [remoteStreams, setRemoteStreams] = useState<{ [key: string]: MediaStream }>({});
+    const remoteAudioElementsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
+    const [masterVolume, setMasterVolume] = useState<number>(1);
+    const [audioUnlocked, setAudioUnlocked] = useState<boolean>(false);
     const [speakingPeers, setSpeakingPeers] = useState<Record<string, boolean>>({});
     const remoteAudioContextRef = useRef<AudioContext | null>(null);
     const remoteAnalyzersRef = useRef<Map<string, { analyser: AnalyserNode, dataArray: Uint8Array<ArrayBuffer>, rafId: number }>>(new Map());
@@ -483,6 +486,11 @@ useEffect(() => {
         };
     }, [user, roomId]);
 
+    // Keep all remote audio elements' volumes in sync with masterVolume
+    useEffect(() => {
+        remoteAudioElementsRef.current.forEach(el => { try { el.volume = masterVolume; } catch {} });
+    }, [masterVolume]);
+
     if (!room || isLoading) {
         return (
             <div className="flex flex-col items-center justify-center min-h-screen bg-zinc-900 text-white">
@@ -505,21 +513,24 @@ useEffect(() => {
         <div className="w-screen h-screen bg-zinc-900 relative font-sans text-white overflow-hidden">
             <GameBoard room={room} speakingPeers={speakingPeers} />
              {Object.entries(remoteStreams).map(([uid, stream]) => (
-                 <audio
-                   key={uid}
-                   data-peer-audio
-                   autoPlay
-                   playsInline
-                   // ensure not muted and try to play on canplay for autoplay policies
-                   muted={false}
-                   ref={audioEl => {
-                     if (audioEl && audioEl.srcObject !== stream) {
-                       audioEl.srcObject = stream;
-                       audioEl.play?.().catch(() => {});
-                     }
-                   }}
-                   onCanPlay={e => { try { (e.currentTarget as HTMLAudioElement).play(); } catch {} }}
-                 />
+                  <audio
+                    key={uid}
+                    data-peer-audio
+                    autoPlay
+                    playsInline
+                    // ensure not muted and try to play on canplay for autoplay policies
+                    muted={false}
+                    ref={audioEl => {
+                      if (!audioEl) return;
+                      remoteAudioElementsRef.current.set(uid, audioEl);
+                      if (audioEl.srcObject !== stream) {
+                        audioEl.srcObject = stream;
+                      }
+                      audioEl.volume = masterVolume;
+                      audioEl.play?.().catch(() => {});
+                    }}
+                     onCanPlay={e => { try { (e.currentTarget as HTMLAudioElement).play(); } catch {} }}
+                  />
              ))}
 
             {/* Leaderboard UI */}
@@ -572,9 +583,23 @@ useEffect(() => {
                     </div>
                 </div>
                  <div className="flex flex-col gap-2 p-2 bg-zinc-900/70 backdrop-blur-md rounded-lg border border-zinc-700/60 shadow-lg items-center">
+                    {!audioUnlocked && (
+                      <Button variant="secondary" size="sm" onClick={() => {
+                        try { remoteAudioContextRef.current?.resume(); } catch {}
+                        try {
+                          remoteAudioElementsRef.current.forEach(a => { a.play?.().catch(() => {}); });
+                          setAudioUnlocked(true);
+                        } catch { setAudioUnlocked(false); }
+                      }}>
+                        Enable Audio
+                      </Button>
+                    )}
+                    {audioUnlocked && (
+                      <span className="text-[10px] uppercase tracking-widest text-zinc-400">Audio Enabled</span>
+                    )}
                      <Button variant="ghost" onClick={() => setIsChatVisible(v => !v)} aria-label="Toggle Chat" title={isChatVisible ? "Hide Chat" : "Show Chat"} size="icon" className="h-10 w-10 hover:bg-zinc-700 text-white">
                         <MessageSquare className="h-5 w-5" />
-                    </Button>
+                     </Button>
                     <Button
                         variant="ghost"
                         onClick={handleToggleMute}
@@ -584,10 +609,14 @@ useEffect(() => {
                     >
                         {isMuted ? <MicOff className="h-5 w-5 text-red-400" /> : <Mic className="h-5 w-5 text-white" />}
                     </Button>
-                    <Button variant="ghost" onClick={handleLeaveGamePermanently} aria-label="Leave" title="Leave Game" size="icon" className="h-10 w-10 text-red-400 hover:bg-red-500/20 hover:text-red-400">
-                        <LogOut className="h-5 w-5" />
-                    </Button>
-                </div>
+                     <Button variant="ghost" onClick={handleLeaveGamePermanently} aria-label="Leave" title="Leave Game" size="icon" className="h-10 w-10 text-red-400 hover:bg-red-500/20 hover:text-red-400">
+                         <LogOut className="h-5 w-5" />
+                     </Button>
+                     <div className="flex items-center gap-2 w-32">
+                       <span className="text-xs text-zinc-400">Vol</span>
+                       <input type="range" min={0} max={100} defaultValue={100} onChange={(e) => setMasterVolume(Number(e.target.value)/100)} className="w-full" />
+                     </div>
+                 </div>
             </div>
 
             {/* Event Log */}
