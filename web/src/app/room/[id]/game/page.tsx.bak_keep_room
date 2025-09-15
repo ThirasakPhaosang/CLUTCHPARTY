@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @license
  * SPDX-License-Identifier: Apache-2.0
 */
@@ -102,7 +102,9 @@ export default function GamePage() {
         });
         return () => unsubscribe();
     }, [router]);
+
     useEffect(() => {
+        if (!roomId) return;
         const roomRef = doc(db, "rooms", roomId);
         const unsubscribe = onSnapshot(roomRef,
         (docSnap) => {
@@ -144,11 +146,8 @@ export default function GamePage() {
         });
         return () => unsubscribe();
     }, [roomId, router]);
-useEffect(() => {
-  if (room?.id) {
-    try { localStorage.setItem('lastRoomId', room.id); } catch {}
-  }
-}, [room?.id]);
+
+    // Set initial mute state from Firestore
     useEffect(() => {
         const myPlayer = room?.players.find(p => p.uid === user?.uid);
         if (myPlayer) {
@@ -378,6 +377,11 @@ useEffect(() => {
                 if (!roomDoc.exists()) return;
 
                 const roomData = roomDoc.data() as GameRoom;
+                
+                if (roomData.players.length <= 1) {
+                    transaction.delete(roomRef);
+                    return;
+                }
 
                 const playerToRemove = roomData.players.find(p => p.uid === user.uid);
                 if (playerToRemove) {
@@ -595,10 +599,6 @@ useEffect(() => {
         </div>
     );
 }
-
-
-
-
 
 
 

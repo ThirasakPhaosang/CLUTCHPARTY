@@ -6,7 +6,7 @@
 
 import React, { useState, useEffect, forwardRef, InputHTMLAttributes, ButtonHTMLAttributes, useRef, TextareaHTMLAttributes } from 'react';
 import { useRouter, useParams } from 'next/navigation';
-import { auth, db } from '../../../lib/firebase';
+import { auth, db } from '../../../../lib/firebase';
 import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
 import { doc, onSnapshot, updateDoc, deleteDoc, arrayUnion, Timestamp, runTransaction, arrayRemove, collection, query, where, writeBatch, getDocs, addDoc, serverTimestamp, getDoc, setDoc, deleteField } from 'firebase/firestore';
 import { cva, type VariantProps } from "class-variance-authority";
