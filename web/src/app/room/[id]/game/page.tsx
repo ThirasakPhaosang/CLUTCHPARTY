@@ -205,7 +205,15 @@ useEffect(() => {
 
         const setupMic = async () => {
             try {
-                localStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+                localStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: false,
+                        channelCount: 1,
+                        sampleRate: 48000
+                    }
+                });
                 audioStreamRef.current = localStream;
                 const currentPlayer = roomStateRef.current?.players.find(p => p.uid === user.uid);
                 const isInitiallyMuted = currentPlayer ? currentPlayer.isMuted : true;
@@ -215,7 +223,7 @@ useEffect(() => {
                 const AudioCtx = window.AudioContext || window.webkitAudioContext;
                 if (!AudioCtx) throw new Error("AudioContext not supported");
                 
-                audioContext = new AudioCtx();
+                audioContext = new AudioCtx({ latencyHint: 'interactive' } as AudioContextOptions);
                 analyser = audioContext.createAnalyser();
                 source = audioContext.createMediaStreamSource(localStream);
                 source.connect(analyser);
@@ -304,14 +312,22 @@ useEffect(() => {
         const myId = user.uid;
         const roomRef = doc(db, "rooms", roomId);
         const signalingCollection = collection(roomRef, 'signaling');
-        const pcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+        const iceServers: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
+        if (process.env.NEXT_PUBLIC_TURN_URL) {
+          const urls = process.env.NEXT_PUBLIC_TURN_URL.split(',').map(s => s.trim()).filter(Boolean);
+          iceServers.push({ urls, username: process.env.NEXT_PUBLIC_TURN_USERNAME, credential: process.env.NEXT_PUBLIC_TURN_CREDENTIAL } as RTCIceServer);
+        }
+        const pcConfig: RTCConfiguration = { iceServers };
         const localPeerConnections = { ...peerConnectionsRef.current };
         const createPeerConnection = (peerId: string, initiator: boolean) => {
             if (localPeerConnections[peerId]) return localPeerConnections[peerId];
             const pc = new RTCPeerConnection(pcConfig);
             localPeerConnections[peerId] = pc;
             audioStreamRef.current?.getTracks().forEach(track => pc.addTrack(track, audioStreamRef.current!));
-            pc.ontrack = (event) => setRemoteStreams(prev => ({ ...prev, [peerId]: event.streams[0] }));
+            pc.ontrack = (event) => {
+              const stream = event.streams?.[0] ?? new MediaStream([event.track]);
+              setRemoteStreams(prev => ({ ...prev, [peerId]: stream }));
+            };
             pc.onicecandidate = e => e.candidate && addDoc(signalingCollection, { from: myId, to: peerId, signal: { type: 'candidate', candidate: e.candidate.toJSON() } });
             // Negotiation: only the chosen initiator proactively creates offers to reduce glare
             if (initiator) {

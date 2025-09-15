@@ -178,6 +178,7 @@ const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>(
 const remoteStreamAnalyzersRef = useRef<Map<string, { analyser: AnalyserNode, dataArray: Uint8Array<ArrayBuffer>, animationFrameId: number }>>(new Map());
     const audioContextRef = useRef<AudioContext | null>(null);
 const [masterVolume, setMasterVolume] = useState<number>(1);
+const [audioUnlocked, setAudioUnlocked] = useState<boolean>(false);
     const iceCandidateQueues = useRef<Record<string, RTCIceCandidateInit[]>>({});
     
     // Refs for Perfect Negotiation Pattern
@@ -1050,7 +1051,12 @@ handleSendMessage();
                       
       <Volume2 className="h-5 w-5" />
                     </div>
-                    <Button variant="outline" size="sm" onClick={handleEnableAudio}>Enable Audio</Button>
+                    {!audioUnlocked && (
+                      <Button variant="outline" size="sm" onClick={() => { handleEnableAudio(); setAudioUnlocked(true); }}>Enable Audio</Button>
+                    )}
+                    {audioUnlocked && (
+                      <span className="text-[10px] uppercase tracking-widest text-zinc-400">Audio Enabled</span>
+                    )}
                 </div>
 
                 <div className="flex items-center gap-2 flex-wrap justify-end">
