@@ -87,7 +87,7 @@ export default function GamePage() {
     const remoteAudioContextRef = useRef<AudioContext | null>(null);
     const remoteAnalyzersRef = useRef<Map<string, { analyser: AnalyserNode, dataArray: Uint8Array<ArrayBuffer>, rafId: number }>>(new Map());
     const makingOfferRef = useRef<Record<string, boolean>>({});
-    const ignoreOfferRef = useRef<Record<string, boolean>>({});
+    const isNegotiatingRef = useRef<Record<string, boolean>>({});
     const iceCandidateQueues = useRef<{ [key: string]: RTCIceCandidateInit[] }>({});
     // removed unused lastDbUpdateRef
 
@@ -314,6 +314,8 @@ useEffect(() => {
             if (initiator) {
               pc.onnegotiationneeded = async () => {
                 if (pc.signalingState !== 'stable') return;
+                if (isNegotiatingRef.current[peerId]) return;
+                isNegotiatingRef.current[peerId] = true;
                 try {
                   makingOfferRef.current[peerId] = true;
                   await pc.setLocalDescription(await pc.createOffer());
@@ -322,6 +324,7 @@ useEffect(() => {
                   // ignore
                 } finally {
                   makingOfferRef.current[peerId] = false;
+                  isNegotiatingRef.current[peerId] = false;
                 }
               };
             }
@@ -340,18 +343,21 @@ useEffect(() => {
                     if (!pc) continue;
                     try {
                         if (signal.type === 'offer') {
-                            // Perfect negotiation-style glare handling
+                            // Perfect negotiation with rollback
                             const polite = myId > fromId;
-                            const offerCollision = makingOfferRef.current[fromId] || pc.signalingState !== 'stable';
+                            const offerCollision = (makingOfferRef.current[fromId] === true) || pc.signalingState !== 'stable';
                             if (offerCollision && !polite) {
                               // Ignore the offer; let the other side win
                             } else {
-                              await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: signal.sdp }));
+                              if (offerCollision && polite && pc.signalingState !== 'stable') {
+                                // Rollback local description before applying remote offer
+                                try { await pc.setLocalDescription({ type: 'rollback' } as RTCSessionDescriptionInit); } catch {}
+                              }
+                              await pc.setRemoteDescription({ type: 'offer', sdp: signal.sdp } as RTCSessionDescriptionInit);
                               const queue = iceCandidateQueues.current[fromId] || [];
                               for (const c of queue) { await pc.addIceCandidate(new RTCIceCandidate(c)); }
                               iceCandidateQueues.current[fromId] = [];
-                              const answer = await pc.createAnswer();
-                              await pc.setLocalDescription(answer);
+                              await pc.setLocalDescription(await pc.createAnswer());
                               await addDoc(signalingCollection, { from: myId, to: fromId, signal: { type: 'answer', sdp: pc.localDescription?.sdp } });
                             }
                         } else if (signal.type === 'answer') {
