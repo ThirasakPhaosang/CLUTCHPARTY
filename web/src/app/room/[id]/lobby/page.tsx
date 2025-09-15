@@ -173,7 +173,8 @@ const [speakingPeers, setSpeakingPeers] = useState<Record<string, boolean>>({});
 
     const audioStreamRef = useRef<MediaStream | null>(null);
 const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
-    const remoteAudioElementsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
+const remoteAudioElementsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
+const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({});
 const remoteStreamAnalyzersRef = useRef<Map<string, { analyser: AnalyserNode, dataArray: Uint8Array<ArrayBuffer>, animationFrameId: number }>>(new Map());
     const audioContextRef = useRef<AudioContext | null>(null);
 const [masterVolume, setMasterVolume] = useState<number>(1);
@@ -353,7 +354,12 @@ remoteStreamAnalyzersRef.current.set(peerId, { analyser, dataArray, animationFra
         const myId = user.uid;
         const roomRef = doc(db, "rooms", roomId);
         const signalingCollection = collection(roomRef, 'signaling');
-        const pcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+        const iceServers: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
+        if (process.env.NEXT_PUBLIC_TURN_URL) {
+            const urls = process.env.NEXT_PUBLIC_TURN_URL.split(',').map(u => u.trim()).filter(Boolean);
+            iceServers.push({ urls, username: process.env.NEXT_PUBLIC_TURN_USERNAME, credential: process.env.NEXT_PUBLIC_TURN_CREDENTIAL } as RTCIceServer);
+        }
+        const pcConfig = { iceServers } as RTCConfiguration;
 
         const createPeerConnection = (peerId: string, initiator: boolean) => {
             if (peerConnectionsRef.current.has(peerId)) return;
@@ -364,15 +370,7 @@ remoteStreamAnalyzersRef.current.set(peerId, { analyser, dataArray, animationFra
 
             pc.ontrack = (event) => {
                 const stream = event.streams[0];
-                const audioEl = remoteAudioElementsRef.current.get(peerId) || new Audio();
-                audioEl.autoplay = true;
-                // iOS inline playback
-                try { audioEl.setAttribute('playsinline', 'true'); } catch {}
-                audioEl.muted = false;
-                audioEl.srcObject = stream;
-                audioEl.oncanplay = () => { try { audioEl.play(); } catch {} };
-                audioEl.play().catch(() => {});
-                remoteAudioElementsRef.current.set(peerId, audioEl);
+                setRemoteStreams(prev => ({ ...prev, [peerId]: stream }));
                 analyzeRemoteStream(stream, peerId);
             };
             
@@ -415,6 +413,7 @@ remoteStreamAnalyzersRef.current.set(peerId, { analyser, dataArray, animationFra
                 if (analyzer) cancelAnimationFrame(analyzer.animationFrameId);
                 remoteStreamAnalyzersRef.current.delete(peerId);
                 setSpeakingPeers(prev => { const next = {...prev}; delete next[peerId]; return next; });
+                setRemoteStreams(prev => { const next = { ...prev }; delete next[peerId]; return next; });
             }
         });
 
@@ -520,6 +519,10 @@ useEffect(() => {
         audioEl.volume = masterVolume;
       });
     }, [masterVolume]);
+const handleEnableAudio = () => {
+        try { audioContextRef.current?.resume(); } catch {}
+        remoteAudioElementsRef.current.forEach((audio) => { try { audio.play(); } catch {} });
+    };
 const handleLeaveRoom = async () => {
         if (!user || !roomId || !room) return;
 router.push('/lobby');
@@ -1042,11 +1045,12 @@ handleSendMessage();
                     </div>
     
                 <div className="flex items-center gap-2 w-40">
-                         <VolumeX className="h-5 w-5" />
-                         <Slider defaultValue={[100]} onValueChange={(v) => setMasterVolume(v[0] / 100)} />
-                    
-     <Volume2 className="h-5 w-5" />
+                          <VolumeX className="h-5 w-5" />
+                          <Slider defaultValue={[100]} onValueChange={(v) => setMasterVolume(v[0] / 100)} />
+                      
+      <Volume2 className="h-5 w-5" />
                     </div>
+                    <Button variant="outline" size="sm" onClick={handleEnableAudio}>Enable Audio</Button>
                 </div>
 
                 <div className="flex items-center gap-2 flex-wrap justify-end">
@@ -1082,6 +1086,25 @@ onlineFriends.map(friend => (
               
   </DialogContent>
             </Dialog>
+        {/* Hidden audio elements to satisfy autoplay policies */}
+        <div className="sr-only">
+          {Object.entries(remoteStreams).map(([uid, stream]) => (
+            <audio
+              key={uid}
+              data-peer-audio
+              autoPlay
+              playsInline
+              ref={el => {
+                if (!el) return;
+                remoteAudioElementsRef.current.set(uid, el);
+                if (el.srcObject !== stream) {
+                  el.srcObject = stream;
+                }
+                el.play?.().catch(() => {});
+              }}
+            />
+          ))}
         </div>
+    </div>
     );
 }
