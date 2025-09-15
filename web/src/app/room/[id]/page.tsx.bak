@@ -160,7 +160,6 @@ export default function RoomPage() {
     const [incomingRequests, setIncomingRequests] = useState<FriendRequest[]>([]);
     const [sentRequests, setSentRequests] = useState<FriendRequest[]>([]);
     const [isChatVisible, setIsChatVisible] = useState(true);
-    const [localMuted, setLocalMuted] = useState(true);
     const [speakingPeers, setSpeakingPeers] = useState<Record<string, boolean>>({});
     
     const chatEndRef = useRef<HTMLDivElement>(null);
@@ -190,18 +189,15 @@ export default function RoomPage() {
     useEffect(() => {
         if (!roomId || !user) return;
         const roomRef = doc(db, "rooms", roomId);
-        const roomUnsubscribe = onSnapshot(roomRef,
-        (docSnap) => {
+        const roomUnsubscribe = onSnapshot(roomRef, (docSnap) => {
             if (docSnap.exists()) {
-                type FirestoreRoomData = Partial<GameRoom> & Record<string, unknown> & { id: string };
-                const raw = { id: docSnap.id, ...docSnap.data() } as unknown as FirestoreRoomData;
-                const rawPlayers = (raw as Record<string, unknown>).players as unknown;
-                const normalizedPlayers: Player[] = Array.isArray(rawPlayers)
-                    ? (rawPlayers as Player[])
-                    : rawPlayers && typeof rawPlayers === 'object'
-                        ? (Object.values(rawPlayers as Record<string, Player>))
+                const raw = { id: docSnap.id, ...docSnap.data() } as any;
+                const normalizedPlayers: Player[] = Array.isArray(raw.players)
+                    ? raw.players
+                    : raw.players
+                        ? (Object.values(raw.players) as Player[])
                         : [];
-                const roomData: GameRoom = { ...(raw as GameRoom), players: normalizedPlayers };
+                const roomData: GameRoom = { ...(raw as GameRoom), players: normalizedPlayers } as GameRoom;
                 const playerIds = Object.keys(roomData.playerIds || {});
                 if (!playerIds.includes(user.uid)) {
                     toast.error("You have been removed from the room."); router.push('/lobby'); return;
@@ -210,13 +206,6 @@ export default function RoomPage() {
                 if (!isEditingName) setNewRoomName(roomData.name);
             } else {
                 toast.error("Room not found."); router.push('/lobby');
-            }
-        },
-        (error) => {
-            console.warn('Room snapshot error', error);
-            if ((error as any)?.code === 'permission-denied') {
-                toast.error('Missing permission to view this room');
-                router.push('/lobby');
             }
         });
         return () => roomUnsubscribe();
@@ -237,9 +226,7 @@ export default function RoomPage() {
                 });
                 audioStreamRef.current = localStream;
                 const myPlayer = room?.players.find(p => p.uid === user.uid);
-                const startMuted = myPlayer?.isMuted ?? true;
-                setLocalMuted(startMuted);
-                localStream.getAudioTracks().forEach(track => { track.enabled = !startMuted; });
+                localStream.getAudioTracks().forEach(track => { track.enabled = !(myPlayer?.isMuted ?? true); });
 
                 const AudioCtx = window.AudioContext || window.webkitAudioContext;
                 if (!AudioCtx) return;
@@ -479,14 +466,7 @@ export default function RoomPage() {
                 const roomDoc = await transaction.get(roomRef);
                 if (!roomDoc.exists()) return;
     
-                const raw = roomDoc.data() as unknown as Partial<GameRoom> & Record<string, unknown>;
-                const rawPlayers = (raw as Record<string, unknown>).players as unknown;
-                const currentPlayers: Player[] = Array.isArray(rawPlayers)
-                  ? (rawPlayers as Player[])
-                  : rawPlayers && typeof rawPlayers === 'object'
-                    ? (Object.values(rawPlayers as Record<string, Player>))
-                    : [];
-                const roomData = { ...(raw as GameRoom), players: currentPlayers } as GameRoom;
+                const roomData = roomDoc.data() as GameRoom;
                 const playerToRemove = roomData.players.find(p => p.uid === user.uid);
     
                 if (roomData.players.length <= 1) {
@@ -540,13 +520,7 @@ export default function RoomPage() {
         runTransaction(db, async (transaction) => {
             const roomDoc = await transaction.get(roomRef);
             if (!roomDoc.exists()) throw new Error("Room not found");
-            const raw = roomDoc.data() as unknown as Partial<GameRoom> & Record<string, unknown>;
-            const rawPlayers = (raw as Record<string, unknown>).players as unknown;
-            const currentPlayers: Player[] = Array.isArray(rawPlayers)
-              ? (rawPlayers as Player[])
-              : rawPlayers && typeof rawPlayers === 'object'
-                ? (Object.values(rawPlayers as Record<string, Player>))
-                : [];
+            const currentPlayers = roomDoc.data().players as Player[];
             const realPlayerIndex = currentPlayers.findIndex(p => p.uid === user.uid);
             if (realPlayerIndex > -1) {
                 const newPlayers = [...currentPlayers];
@@ -577,24 +551,9 @@ export default function RoomPage() {
         const optimisticPlayers = [...originalPlayers];
         optimisticPlayers[playerIndex] = { ...optimisticPlayers[playerIndex], isMuted: newMutedState };
         setRoom({ ...room, players: optimisticPlayers });
-        setLocalMuted(newMutedState);
 
-        runTransaction(db, async (transaction) => {
-            const snap = await transaction.get(roomRef);
-            if (!snap.exists()) throw new Error('Room not found');
-            const raw = snap.data() as unknown as Partial<GameRoom> & Record<string, unknown>;
-            const rawPlayers = (raw as Record<string, unknown>).players as unknown;
-            const currentPlayers: Player[] = Array.isArray(rawPlayers)
-              ? (rawPlayers as Player[])
-              : rawPlayers && typeof rawPlayers === 'object'
-                ? (Object.values(rawPlayers as Record<string, Player>))
-                : [];
-            const idx = currentPlayers.findIndex(p => p.uid === user.uid);
-            if (idx === -1) return;
-            const newPlayers = [...currentPlayers];
-            newPlayers[idx] = { ...newPlayers[idx], isMuted: newMutedState };
-            transaction.update(roomRef, { players: newPlayers });
-        }).catch(e => {
+        const realPlayerIndex = room.players.findIndex(p => p.uid === user.uid);
+        updateDoc(roomRef, { [`players.${realPlayerIndex}.isMuted`]: newMutedState }).catch(e => {
             console.error("Mute toggle failed:", e);
             toast.error("Failed to sync mute status.");
             setRoom({ ...room, players: originalPlayers });
@@ -626,31 +585,16 @@ export default function RoomPage() {
                 const roomDoc = await transaction.get(roomRef);
                 if (!roomDoc.exists()) throw new Error("Room does not exist.");
     
-                const raw = roomDoc.data() as unknown as Partial<GameRoom> & Record<string, unknown>;
-                const rawPlayers = (raw as Record<string, unknown>).players as unknown;
-                const currentPlayers: Player[] = Array.isArray(rawPlayers)
-                  ? (rawPlayers as Player[])
-                  : rawPlayers && typeof rawPlayers === 'object'
-                    ? (Object.values(rawPlayers as Record<string, Player>))
-                    : [];
-                const roomData = { ...(raw as GameRoom), players: currentPlayers } as GameRoom;
+                const roomData = roomDoc.data() as GameRoom;
                 const playerToKick = roomData.players.find(p => p.uid === playerId);
     
                 if (!playerToKick) return;
     
-                // Use atomic arrayRemove for array field; otherwise write normalized array
-                if (Array.isArray(rawPlayers)) {
-                    transaction.update(roomRef, {
-                        players: arrayRemove(playerToKick),
-                        [`playerIds.${playerId}`]: deleteField()
-                    });
-                } else {
-                    const newPlayers = roomData.players.filter(p => p.uid !== playerId);
-                    transaction.update(roomRef, {
-                        players: newPlayers,
-                        [`playerIds.${playerId}`]: deleteField()
-                    });
-                }
+                // Use atomic arrayRemove and deleteField
+                transaction.update(roomRef, {
+                    players: arrayRemove(playerToKick),
+                    [`playerIds.${playerId}`]: deleteField()
+                });
                 toast.success(`${playerToKick.displayName} was kicked.`);
             });
         } catch (error) {
@@ -911,7 +855,7 @@ export default function RoomPage() {
                         <h3 className="text-lg font-bold mb-4 flex items-center gap-2 flex-shrink-0"><MessageSquare /> Chat</h3>
                         <div className="flex-1 overflow-y-auto mb-4 space-y-3 pr-2 text-sm custom-scrollbar min-h-0 overscroll-contain">
                         {room.chatMessages.map((msg, i) => (
-                            <div key={`${msg.senderUID}-${msg.timestamp?.toMillis?.() ?? i}`} className={cn("flex flex-col w-full", msg.senderUID === myUid ? "items-end" : "items-start")}>
+                            <div key={i} className={cn("flex flex-col w-full", msg.senderUID === myUid ? "items-end" : "items-start")}>
                                 <div className={cn("max-w-[90%] rounded-lg px-3 py-2", msg.senderUID === myUid ? "bg-primary text-primary-foreground" : "bg-zinc-700")}>
                                     {msg.senderUID !== user.uid && <p className="text-xs font-bold text-blue-400 mb-1">{msg.sender}</p>}
                                     <p className="text-sm break-words">{msg.text}</p>
@@ -954,11 +898,9 @@ export default function RoomPage() {
                  <div className="flex items-center gap-4">
                     <div className="flex items-center gap-2">
                         {/* Mic toggle shows speaking pulse when active */}
-                        {(() => { const isMyMuted = myPlayer?.isMuted ?? localMuted; return (
-                        <Button onClick={handleToggleMute} variant="outline" size="icon" className={cn('w-9 h-9 flex-shrink-0', !isMyMuted && speakingPeers[myUid] ? 'ring-2 ring-blue-400 animate-pulse' : '')}>
-                            {isMyMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4 text-blue-300" />}
+                        <Button onClick={handleToggleMute} variant="outline" size="icon" className={cn('w-9 h-9 flex-shrink-0', !myPlayer?.isMuted && speakingPeers[myUid] ? 'ring-2 ring-blue-400 animate-pulse' : '')}>
+                            {myPlayer?.isMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4 text-blue-300" />}
                         </Button>
-                        ); })()}
                     </div>
                     <div className="flex items-center gap-2 w-40">
                          <VolumeX className="h-5 w-5" />
@@ -996,6 +938,4 @@ export default function RoomPage() {
         </div>
     );
 }
-
-
 

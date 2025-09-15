@@ -546,7 +546,7 @@ export default function GamePage() {
                         variant="ghost"
                         onClick={handleToggleMute}
                         aria-label="Toggle Mic"
-                        className={cn( "h-10 w-10 hover:bg-zinc-700 text-white rounded-full border border-zinc-600", !isMuted && "ring-2 ring-green-500 bg-green-500/20", (isSpeaking && !isMuted) && "animate-pulse")}
+                        className={cn( "h-10 w-10 hover:bg-zinc-700 text-white rounded-full border border-zinc-600", !isMuted && "ring-2 ring-green-500 bg-green-500/20")}
                         title={isMuted ? "Unmute" : "Mute"}
                     >
                         {isMuted ? <MicOff className="h-5 w-5 text-red-400" /> : <Mic className="h-5 w-5 text-white" />}
@@ -597,5 +597,4 @@ export default function GamePage() {
         </div>
     );
 }
-
 

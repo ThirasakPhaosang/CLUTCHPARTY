@@ -11,6 +11,7 @@ import { onAuthStateChanged, signOut, User } from 'firebase/auth';
 import { doc, getDoc, updateDoc, collection, query, where, getDocs, setDoc, serverTimestamp, arrayUnion, onSnapshot, addDoc, Timestamp, writeBatch, deleteDoc, runTransaction } from "firebase/firestore";
 import Image from 'next/image';
 import { toast } from "sonner";
+import { UserProfile, FriendRequest, GameRoom, GameInvite, Player } from "@/lib/types";
 
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import * as SliderPrimitive from "@radix-ui/react-slider";
@@ -21,63 +22,6 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 import { LogOut, LoaderCircle, Users, Lock, Search, PlusCircle, UsersRound, Gamepad2, UserPlus, Check, X, Hourglass, MailQuestion, Send, Bell, Pencil } from "lucide-react";
-
-// --- TYPES ---
-interface UserProfile {
-  uid: string;
-  email: string | null;
-  displayName: string | null;
-  tag: string | null;
-  createdAt: Timestamp;
-  friends: string[];
-  status?: 'online' | 'offline';
-  lastSeen?: Timestamp;
-  profileInitialized?: boolean;
-}
-
-interface FriendRequest {
-  id: string;
-  from: { uid: string; displayName: string | null; tag: string | null; };
-  to: { uid: string; displayName: string | null; tag: string | null; };
-  status: 'pending' | 'accepted' | 'declined';
-  createdAt: Timestamp;
-}
-
-interface GameRoom {
-  id: string;
-  name: string;
-  maxPlayers: number;
-  hasPassword?: boolean;
-  password?: string;
-  host: {
-    uid: string;
-    displayName: string | null;
-  };
-  players: {
-    uid: string;
-    displayName: string | null;
-    tag: string | null;
-    isReady: boolean;
-    isMuted: boolean;
-    isSpeaking: boolean;
-    isLoaded: boolean;
-    status: 'connected' | 'disconnected';
-  }[];
-  playerIds: string[];
-  createdAt: Timestamp;
-  status: 'waiting' | 'loading' | 'playing' | 'finished';
-}
-
-interface GameInvite {
-    id: string;
-    from: { uid: string; displayName: string | null; };
-    to: { uid: string; };
-    roomId: string;
-    roomName: string;
-    status: 'pending' | 'accepted' | 'declined';
-    createdAt: Timestamp;
-}
-
 
 // --- UTILS & COMPONENTS ---
 function cn(...inputs: ClassValue[]) {
@@ -516,7 +460,14 @@ const InvitationsTab: FC<{ user: User }> = ({ user }) => {
                 return;
             }
 
-            const roomData = roomSnap.data() as GameRoom;
+            const raw = roomSnap.data() as unknown as Partial<GameRoom> & Record<string, unknown>;
+            const rawPlayers = (raw as Record<string, unknown>).players as unknown;
+            const currentPlayers: Player[] = Array.isArray(rawPlayers)
+              ? (rawPlayers as Player[])
+              : rawPlayers && typeof rawPlayers === 'object'
+                ? (Object.values(rawPlayers as Record<string, Player>))
+                : [];
+            const roomData = { ...(raw as GameRoom), players: currentPlayers } as GameRoom;
             const userData = userSnap.data() as UserProfile;
             
             if(roomData.players.length >= roomData.maxPlayers) {
@@ -524,7 +475,7 @@ const InvitationsTab: FC<{ user: User }> = ({ user }) => {
                 await deleteDoc(doc(db, "invitations", invite.id));
                 return;
             }
-             if (roomData.playerIds.includes(user.uid)) {
+             if (roomData.players.some(p => p.uid === user.uid)) {
                 router.push(`/room/${invite.roomId}`);
                 return;
             }
@@ -540,10 +491,17 @@ const InvitationsTab: FC<{ user: User }> = ({ user }) => {
                 status: 'connected' as const,
             };
 
-            await updateDoc(roomRef, { 
-                players: arrayUnion(newPlayer),
-                playerIds: arrayUnion(user.uid)
-            });
+            if (Array.isArray(rawPlayers)) {
+                await updateDoc(roomRef, { 
+                    players: arrayUnion(newPlayer),
+                    [`playerIds.${user.uid}`]: true,
+                });
+            } else {
+                await updateDoc(roomRef, { 
+                    players: [...currentPlayers, newPlayer],
+                    [`playerIds.${user.uid}`]: true,
+                });
+            }
 
             await deleteDoc(doc(db, "invitations", invite.id));
             router.push(`/room/${invite.roomId}`);
@@ -618,6 +576,7 @@ const CreateRoom: FC<{ user: User | null, userProfile: UserProfile | null }> = (
           uid: user.uid,
           displayName: userProfile.displayName,
         },
+        playerIds: { [user.uid]: true },
         players: [{
           uid: user.uid,
           displayName: userProfile.displayName,
@@ -628,7 +587,6 @@ const CreateRoom: FC<{ user: User | null, userProfile: UserProfile | null }> = (
           isLoaded: false,
           status: 'connected',
         }],
-        playerIds: [user.uid],
         createdAt: serverTimestamp(),
         chatMessages: [],
         status: 'waiting',
@@ -690,17 +648,35 @@ const RoomList: FC<{ user: User | null, userProfile: UserProfile | null }> = ({ 
   useEffect(() => {
     const q = query(collection(db, "rooms"), where("status", "==", "waiting"));
     const unsubscribe = onSnapshot(q, (querySnapshot) => {
-      const roomsData: GameRoom[] = [];
-      querySnapshot.forEach((doc) => {
-        roomsData.push({ id: doc.id, ...doc.data() } as GameRoom);
+      const roomsData: GameRoom[] = querySnapshot.docs.map((d) => {
+        type FirestoreRoomData = Partial<GameRoom> & Record<string, unknown> & { id: string };
+        const raw = { id: d.id, ...d.data() } as unknown as FirestoreRoomData;
+        const rawPlayers = (raw as Record<string, unknown>).players as unknown;
+        const normalizedPlayers: Player[] = Array.isArray(rawPlayers)
+          ? (rawPlayers as Player[])
+          : rawPlayers && typeof rawPlayers === 'object'
+            ? (Object.values(rawPlayers as Record<string, Player>))
+            : [];
+        return { ...(raw as GameRoom), players: normalizedPlayers };
       });
       setRooms(roomsData);
+      setLoadingRooms(false);
+    }, (error) => {
+      console.warn('Rooms snapshot error', error);
+      if ((error as any)?.code === 'permission-denied') {
+        toast.error('Missing permission to list rooms');
+      }
       setLoadingRooms(false);
     });
     return () => unsubscribe();
   }, []);
 
   const handleJoinClick = (room: GameRoom) => {
+    const players = Array.isArray(room.players) ? room.players : Object.values(((room as unknown) as Record<string, unknown>).players as Record<string, Player> || {});
+    if (players.some(p => p.uid === user?.uid)) {
+        router.push(`/room/${room.id}`);
+        return;
+    }
     if (room.hasPassword) {
       setSelectedRoom(room);
     } else {
@@ -721,10 +697,18 @@ const RoomList: FC<{ user: User | null, userProfile: UserProfile | null }> = ({ 
       await runTransaction(db, async (transaction) => {
         const roomDoc = await transaction.get(roomRef);
         if (!roomDoc.exists()) { throw new Error("Room does not exist!"); }
-        
-        const roomData = roomDoc.data() as GameRoom;
+
+        const raw = roomDoc.data() as unknown as Partial<GameRoom> & Record<string, unknown>;
+        const rawPlayers = (raw as Record<string, unknown>).players as unknown;
+        const currentPlayers: Player[] = Array.isArray(rawPlayers)
+          ? (rawPlayers as Player[])
+          : rawPlayers && typeof rawPlayers === 'object'
+            ? (Object.values(rawPlayers as Record<string, Player>))
+            : [];
+
+        const roomData = { ...(raw as GameRoom), players: currentPlayers } as GameRoom;
         if (roomData.players.length >= roomData.maxPlayers) { throw new Error("Room is full!"); }
-        if (roomData.playerIds.includes(user.uid)) { return; }
+        if (roomData.players.some(p => p.uid === user.uid)) { return; }
 
         const newPlayer = {
           uid: user.uid,
@@ -736,11 +720,19 @@ const RoomList: FC<{ user: User | null, userProfile: UserProfile | null }> = ({ 
           isLoaded: false,
           status: 'connected' as const,
         };
-
-        transaction.update(roomRef, { 
-          players: arrayUnion(newPlayer),
-          playerIds: arrayUnion(user.uid)
-        });
+        
+        // Use atomic updates when field is an array; otherwise write normalized array
+        if (Array.isArray(rawPlayers)) {
+          transaction.update(roomRef, { 
+            players: arrayUnion(newPlayer),
+            [`playerIds.${user.uid}`]: true
+          });
+        } else {
+          transaction.update(roomRef, {
+            players: [...currentPlayers, newPlayer],
+            [`playerIds.${user.uid}`]: true
+          });
+        }
       });
       router.push(`/room/${room.id}`);
     } catch (error: unknown) {
@@ -754,7 +746,7 @@ const RoomList: FC<{ user: User | null, userProfile: UserProfile | null }> = ({ 
     }
   };
 
-  const filteredRooms = rooms.filter(room => room.name.toLowerCase().includes(searchTerm.toLowerCase()));
+  const filteredRooms = rooms.filter(room => (room.name || '').toLowerCase().includes(searchTerm.toLowerCase()));
 
   return (
     <Dialog open={!!selectedRoom} onOpenChange={(open) => !open && setSelectedRoom(null)}>
@@ -892,7 +884,7 @@ export default function LobbyPage() {
                 if (auth.currentUser) {
                     updateUserStatus(auth.currentUser.uid, 'online');
                 }
-            }, 15000); // Heartbeat every 15 seconds
+            }, 10000); // Heartbeat every 10 seconds
 
             const userDocSnap = await getDoc(userDocRef);
             if (!userDocSnap.exists()) {
@@ -922,7 +914,6 @@ export default function LobbyPage() {
 
     const handleBeforeUnload = () => {
         if (auth.currentUser) {
-            // This is a best-effort attempt as it's not guaranteed to run
             updateUserStatus(auth.currentUser.uid, 'offline');
         }
     };

@@ -3,20 +3,11 @@
 import React, { useEffect, useRef, useState } from "react";
 import * as PIXI from "pixi.js";
 import { SPAWN_POINTS } from "@/lib/game/map";
-
-interface Player {
-  uid: string;
-  displayName: string | null;
-  status: "connected" | "disconnected";
-}
-
-interface GameRoom {
-  id: string;
-  players: Player[];
-}
+import { GameRoom } from "@/lib/types";
 
 interface GameBoardProps {
   room: GameRoom;
+  speakingPeers: Record<string, boolean>;
 }
 
 const PLAYER_COLORS = [
@@ -27,17 +18,17 @@ const PLAYER_COLORS = [
 const BASE_W = 1920;
 const BASE_H = 1600;
 
-const GameBoard: React.FC<GameBoardProps> = ({ room }) => {
+const GameBoard: React.FC<GameBoardProps> = ({ room, speakingPeers }) => {
   const canvasRef = useRef<HTMLDivElement>(null);
   const pixiAppRef = useRef<PIXI.Application | null>(null);
-  const playerObjects = useRef<Map<string, PIXI.Container>>(new Map());
+  const playerObjects = useRef<Map<string, { container: PIXI.Container, speakingIndicator: PIXI.Graphics }>>(new Map());
   const [isInitialized, setIsInitialized] = useState(false);
 
-  // สร้าง + ทำลาย Pixi อย่างปลอดภัย (กัน StrictMode/Unmount ระหว่าง init)
   useEffect(() => {
     if (!canvasRef.current) return;
 
     let cancelled = false;
+    let didInit = false;
     let resizeHandler: (() => void) | undefined;
 
     const app = new PIXI.Application();
@@ -53,7 +44,7 @@ const GameBoard: React.FC<GameBoardProps> = ({ room }) => {
             typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1,
         });
       } catch {
-        return; // init fail → ออกเลย
+        return;
       }
 
       if (cancelled) {
@@ -62,30 +53,29 @@ const GameBoard: React.FC<GameBoardProps> = ({ room }) => {
         try { app.destroy(true); } catch {}
         return;
       }
-
-      // set ref หลัง init เสร็จเท่านั้น
+      
       pixiAppRef.current = app;
+      didInit = true;
 
-      // mount canvas แค่ครั้งเดียว
       if (canvasRef.current && canvasRef.current.childElementCount === 0) {
         canvasRef.current.appendChild(app.canvas);
       }
 
-      // จัดการขนาด
       resizeHandler = () => {
         if (!canvasRef.current || !app.stage) return;
-        const parent = canvasRef.current.parentElement;
-        if (!parent) return;
+        const parent = canvasRef.current;
         const parentWidth = parent.clientWidth;
         const parentHeight = parent.clientHeight;
         const scale = Math.min(parentWidth / BASE_W, parentHeight / BASE_H);
+        // Fill parent, center stage
+        app.renderer.resize(parentWidth, parentHeight);
         app.stage.scale.set(scale);
-        app.renderer.resize(BASE_W * scale, BASE_H * scale);
+        app.stage.x = Math.floor((parentWidth - BASE_W * scale) / 2);
+        app.stage.y = Math.floor((parentHeight - BASE_H * scale) / 2);
       };
       window.addEventListener("resize", resizeHandler);
       resizeHandler();
 
-      // พื้นหลังเป็นกริด (เลี่ยงโหลด texture)
       const background = new PIXI.Graphics();
       background.rect(0, 0, BASE_W, BASE_H).fill(0x282c34);
       const gridSize = 50;
@@ -103,35 +93,33 @@ const GameBoard: React.FC<GameBoardProps> = ({ room }) => {
 
     return () => {
       cancelled = true;
-      try { if (resizeHandler) window.removeEventListener("resize", resizeHandler); } catch {}
-
+      if (resizeHandler) window.removeEventListener("resize", resizeHandler);
       const current = pixiAppRef.current;
-
-      // ถ้า ref ยังชี้ instance นี้ → หยุด ticker & ล้าง stage → destroy
-      if (current === app) {
-        try { current.ticker?.stop(); } catch {}
-        try { current.stage?.removeChildren(); } catch {}
-        try { current.destroy(true); } catch {}
-        pixiAppRef.current = null;
-      } else {
-        // init ยังไม่ทัน set ref → ทำลายจาก local instance
-        try { app.ticker?.stop(); } catch {}
-        try { app.stage?.removeChildren(); } catch {}
-        try { app.destroy(true); } catch {}
+      if (didInit) {
+        try {
+          if (current === app && current) {
+            current.ticker?.stop();
+            current.stage?.removeChildren();
+            current.destroy(true);
+            pixiAppRef.current = null;
+          } else {
+            app.ticker?.stop();
+            app.stage?.removeChildren();
+            // Only destroy if renderer exists (init finished)
+            if ((app as any).renderer) app.destroy(true);
+          }
+        } catch {}
       }
-
-      // เคลียร์ DOM
-      const mount = canvasRef.current;
-      if (mount) {
-        try { while (mount.firstChild) mount.removeChild(mount.firstChild); } catch {}
+      if (canvasRef.current) {
+        while (canvasRef.current.firstChild) {
+          canvasRef.current.removeChild(canvasRef.current.firstChild);
+        }
       }
-      // ล้าง cache
       playerObjects.current.clear();
       setIsInitialized(false);
     };
   }, []);
 
-  // sync player sprites กับ room.players
   useEffect(() => {
     const app = pixiAppRef.current;
     if (!app || !app.stage || !isInitialized) return;
@@ -139,60 +127,80 @@ const GameBoard: React.FC<GameBoardProps> = ({ room }) => {
     const currentPlayersOnMap = new Set(playerObjects.current.keys());
     const roomPlayers = new Set(room.players.map((p) => p.uid));
 
-    // ลบคนที่ออก
     currentPlayersOnMap.forEach((uid) => {
       if (!roomPlayers.has(uid)) {
-        const container = playerObjects.current.get(uid);
-        if (container) {
-          try { app.stage.removeChild(container); } catch {}
-          try { container.destroy({ children: true }); } catch {}
-        }
+        const playerObj = playerObjects.current.get(uid);
+        if (playerObj) try { (app as any)?.stage?.removeChild?.(playerObj.container); } catch {}
         playerObjects.current.delete(uid);
       }
     });
 
-    // เพิ่ม/อัปเดตคนในห้อง
     room.players.forEach((player, index) => {
-      let container = playerObjects.current.get(player.uid);
+      let playerObj = playerObjects.current.get(player.uid);
 
-      if (!container) {
+      if (!playerObj) {
         const spawnPoint = SPAWN_POINTS[index % SPAWN_POINTS.length];
         const color = PLAYER_COLORS[index % PLAYER_COLORS.length];
 
-        container = new PIXI.Container();
-
-        const pawn = new PIXI.Graphics()
-          .circle(0, 0, 15)
-          .fill(color)
-          .stroke({ width: 2, color: 0xffffff });
+        const container = new PIXI.Container();
+        
+        const speakingIndicator = new PIXI.Graphics().circle(0, 0, 20).stroke({ width: 3, color: 0x3b82f6 });
+        speakingIndicator.visible = false;
+        container.addChild(speakingIndicator);
+        
+        const pawn = new PIXI.Graphics().circle(0, 0, 15).fill(color).stroke({ width: 2, color: 0xffffff });
         container.addChild(pawn);
 
         const nameText = new PIXI.Text({
           text: player.displayName || "Player",
-          style: new PIXI.TextStyle({
-            fontFamily: "Arial",
-            fontSize: 14,
-            fill: "#ffffff",
-            stroke: { color: "#000000", width: 3, join: "round" },
-          }),
+          style: new PIXI.TextStyle({ fontFamily: "Arial", fontSize: 14, fill: "#ffffff", stroke: { color: "#000000", width: 3, join: "round" } }),
         });
         nameText.anchor.set(0.5, 0);
-        nameText.y = 18;
+        nameText.y = 22;
         container.addChild(nameText);
 
         container.x = spawnPoint.x;
         container.y = spawnPoint.y;
 
         app.stage.addChild(container);
-        playerObjects.current.set(player.uid, container);
+        playerObj = { container, speakingIndicator };
+        playerObjects.current.set(player.uid, playerObj);
       }
-
-      // Update visual state
-      container.alpha = player.status === "disconnected" ? 0.5 : 1.0;
+      
+      playerObj.container.alpha = player.status === "disconnected" ? 0.5 : 1.0;
+      playerObj.speakingIndicator.visible = !!speakingPeers[player.uid];
     });
-  }, [isInitialized, room.players]);
 
-  return <div ref={canvasRef} className="w-full h-full flex items-center justify-center" />;
+  }, [isInitialized, room.players, speakingPeers]);
+  
+  // Animation loop for speaking indicators
+  useEffect(() => {
+    const app = pixiAppRef.current;
+    if (!app) return;
+
+    let time = 0;
+    const ticker = (ticker: PIXI.Ticker) => {
+        time += ticker.deltaTime;
+        const scale = 1 + Math.sin(time * 0.2) * 0.05;
+        playerObjects.current.forEach((obj, uid) => {
+            if (obj.speakingIndicator.visible) {
+              obj.speakingIndicator.scale.set(scale);
+              obj.speakingIndicator.alpha = 0.5 + Math.sin(time * 0.2) * 0.5;
+            }
+        });
+    };
+
+    app.ticker.add(ticker);
+    return () => {
+      try { (app as any)?.ticker?.remove?.(ticker); } catch {}
+    };
+  }, [isInitialized]);
+
+  return (
+    <div className="absolute inset-0">
+      <div ref={canvasRef} className="w-full h-full bg-zinc-800" />
+    </div>
+  );
 };
 
 export default GameBoard;
