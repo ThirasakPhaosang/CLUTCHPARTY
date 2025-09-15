@@ -315,7 +315,7 @@ export default function GamePage() {
                             await pc.setLocalDescription(offer);
                             await addDoc(signalingCollection, { from: myId, to: peerId, signal: { type: 'offer', sdp: pc.localDescription?.sdp } });
                         }
-                    } catch { }
+                    } catch (err) {}
                 };
             }
             return pc;
@@ -354,7 +354,7 @@ export default function GamePage() {
                                iceCandidateQueues.current[fromId].push(signal.candidate);
                            }
                         }
-                    } catch { }
+                    } catch (err) {}
                     await deleteDoc(change.doc.ref);
                 }
             }
@@ -597,6 +597,5 @@ export default function GamePage() {
         </div>
     );
 }
-
 
 

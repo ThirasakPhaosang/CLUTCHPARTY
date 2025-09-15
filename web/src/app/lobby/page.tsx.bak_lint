@@ -660,9 +660,9 @@ const RoomList: FC<{ user: User | null, userProfile: UserProfile | null }> = ({ 
       });
       setRooms(roomsData);
       setLoadingRooms(false);
-    }, (error: import("firebase/firestore").FirestoreError) => {
+    }, (error) => {
       console.warn('Rooms snapshot error', error);
-      if (error?.code === 'permission-denied') {
+      if ((error as any)?.code === 'permission-denied') {
         toast.error('Missing permission to list rooms');
       }
       setLoadingRooms(false);
@@ -990,6 +990,4 @@ export default function LobbyPage() {
     </div>
   );
 }
-
-
 

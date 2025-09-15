@@ -105,8 +105,7 @@ const GameBoard: React.FC<GameBoardProps> = ({ room, speakingPeers }) => {
           } else {
             app.ticker?.stop();
             app.stage?.removeChildren();
-            // Only destroy if renderer exists (init finished)
-            if ((app as any).renderer) app.destroy(true);
+            app.destroy(true);
           }
         } catch {}
       }
@@ -130,7 +129,7 @@ const GameBoard: React.FC<GameBoardProps> = ({ room, speakingPeers }) => {
     currentPlayersOnMap.forEach((uid) => {
       if (!roomPlayers.has(uid)) {
         const playerObj = playerObjects.current.get(uid);
-        if (playerObj) try { (app as any)?.stage?.removeChild?.(playerObj.container); } catch {}
+        if (playerObj) try { app.stage?.removeChild(playerObj.container); } catch {}
         playerObjects.current.delete(uid);
       }
     });
@@ -192,7 +191,7 @@ const GameBoard: React.FC<GameBoardProps> = ({ room, speakingPeers }) => {
 
     app.ticker.add(ticker);
     return () => {
-      try { (app as any)?.ticker?.remove?.(ticker); } catch {}
+      try { app.ticker?.remove(ticker); } catch {}
     };
   }, [isInitialized]);
 

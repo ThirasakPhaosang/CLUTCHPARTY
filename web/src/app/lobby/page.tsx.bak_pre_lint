@@ -9,6 +9,7 @@ import { useRouter } from 'next/navigation';
 import { auth, db } from '../../lib/firebase';
 import { onAuthStateChanged, signOut, User } from 'firebase/auth';
 import { doc, getDoc, updateDoc, collection, query, where, getDocs, setDoc, serverTimestamp, arrayUnion, onSnapshot, addDoc, Timestamp, writeBatch, deleteDoc, runTransaction } from "firebase/firestore";
+import Image from 'next/image';
 import { toast } from "sonner";
 import { UserProfile, FriendRequest, GameRoom, GameInvite, Player } from "@/lib/types";
 
@@ -20,7 +21,7 @@ import * as TabsPrimitive from "@radix-ui/react-tabs";
 import { cva, type VariantProps } from "class-variance-authority";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
-import { LogOut, LoaderCircle, Users, Lock, Search, PlusCircle, UsersRound, Gamepad2, UserPlus, Check, X, Hourglass, MailQuestion, Bell, Pencil } from "lucide-react";
+import { LogOut, LoaderCircle, Users, Lock, Search, PlusCircle, UsersRound, Gamepad2, UserPlus, Check, X, Hourglass, MailQuestion, Send, Bell, Pencil } from "lucide-react";
 
 // --- UTILS & COMPONENTS ---
 function cn(...inputs: ClassValue[]) {
@@ -660,9 +661,9 @@ const RoomList: FC<{ user: User | null, userProfile: UserProfile | null }> = ({ 
       });
       setRooms(roomsData);
       setLoadingRooms(false);
-    }, (error: import("firebase/firestore").FirestoreError) => {
+    }, (error) => {
       console.warn('Rooms snapshot error', error);
-      if (error?.code === 'permission-denied') {
+      if ((error as any)?.code === 'permission-denied') {
         toast.error('Missing permission to list rooms');
       }
       setLoadingRooms(false);
@@ -990,6 +991,4 @@ export default function LobbyPage() {
     </div>
   );
 }
-
-
 

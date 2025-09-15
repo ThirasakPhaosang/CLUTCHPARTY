@@ -4,7 +4,7 @@
 */
 "use client";
 
-import React, { useState, useEffect, forwardRef, InputHTMLAttributes, ButtonHTMLAttributes, useRef, HTMLAttributes, TextareaHTMLAttributes } from 'react';
+import React, { useState, useEffect, forwardRef, InputHTMLAttributes, ButtonHTMLAttributes, useRef, TextareaHTMLAttributes } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import { auth, db } from '../../../lib/firebase';
 import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
@@ -212,9 +212,9 @@ export default function RoomPage() {
                 toast.error("Room not found."); router.push('/lobby');
             }
         },
-        (error) => {
+        (error: import("firebase/firestore").FirestoreError) => {
             console.warn('Room snapshot error', error);
-            if ((error as any)?.code === 'permission-denied') {
+            if (error?.code === 'permission-denied') {
                 toast.error('Missing permission to view this room');
                 router.push('/lobby');
             }
