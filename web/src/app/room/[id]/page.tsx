@@ -143,6 +143,7 @@ export default function RoomPage() {
     const [newRoomName, setNewRoomName] = useState("");
     const [incomingRequests, setIncomingRequests] = useState<FriendRequest[]>([]);
     const [sentRequests, setSentRequests] = useState<FriendRequest[]>([]);
+    const [isChatVisible, setIsChatVisible] = useState(true);
     
     const chatEndRef = useRef<HTMLDivElement>(null);
     const roomStateRef = useRef<GameRoom | null>(null);
@@ -157,6 +158,7 @@ export default function RoomPage() {
     const [micGain, setMicGain] = useState<number>(1);
     const [masterVolume, setMasterVolume] = useState<number>(1);
     const iceCandidateQueues = useRef<{ [key: string]: RTCIceCandidateInit[] }>({});
+    const lastDbUpdateRef = useRef(0);
     
     const localMonitorRef = useRef<HTMLAudioElement | null>(null);
     const [monitorOn, setMonitorOn] = useState<boolean>(false);
@@ -194,15 +196,28 @@ export default function RoomPage() {
     
     useEffect(() => {
         if (!user?.uid || !roomId) return;
-        let animationFrameId: number; let localStream: MediaStream; let audioContext: AudioContext; let analyser: AnalyserNode; let source: MediaStreamAudioSourceNode; let dataArray: Uint8Array<ArrayBuffer>;
+        let animationFrameId: number; let localStream: MediaStream; let audioContext: AudioContext; let analyser: AnalyserNode; let source: MediaStreamAudioSourceNode; let dataArray: Uint8Array;
     
+        const DB_UPDATE_INTERVAL = 300; // ms
+
         const updateSpeakingStatus = (isSpeaking: boolean) => {
-            if (!user || !roomId || !roomStateRef.current) return;
-            const currentPlayer = roomStateRef.current.players.find(p => p.uid === user.uid);
-            if (currentPlayer && currentPlayer.isSpeaking !== isSpeaking) {
-                const updatedPlayers = roomStateRef.current.players.map(p => p.uid === user.uid ? { ...p, isSpeaking } : p);
-                updateDoc(doc(db, "rooms", roomId), { players: updatedPlayers }).catch(console.error);
-            }
+            if (!user || !roomId) return;
+            const roomRef = doc(db, "rooms", roomId);
+            runTransaction(db, async (transaction) => {
+                const roomDoc = await transaction.get(roomRef);
+                if (!roomDoc.exists()) return;
+                const players = (roomDoc.data().players || []) as Player[];
+                const playerIndex = players.findIndex(p => p.uid === user.uid);
+                if (playerIndex !== -1 && players[playerIndex].isSpeaking !== isSpeaking) {
+                    const newPlayers = [...players];
+                    newPlayers[playerIndex].isSpeaking = isSpeaking;
+                    transaction.update(roomRef, { players: newPlayers });
+                }
+            }).catch(err => {
+                if (err.code !== 'aborted') { // Don't log expected contention errors
+                    console.warn('Could not update speaking status in lobby', err);
+                }
+            });
         };
     
         const setupMic = async () => {
@@ -217,7 +232,7 @@ export default function RoomPage() {
                 localStream = await navigator.mediaDevices.getUserMedia(constraints);
                 audioStreamRef.current = localStream;
                 const currentPlayer = roomStateRef.current?.players.find(p => p.uid === user.uid);
-                // Mic monitor (optional)
+
                 if (monitorOn && localMonitorRef.current) {
                     const a = localMonitorRef.current;
                     a.srcObject = localStream;
@@ -243,16 +258,20 @@ export default function RoomPage() {
 
                 source = audioContext.createMediaStreamSource(localStream);
                 source.connect(analyser);
-                dataArray = new Uint8Array(analyser.frequencyBinCount) as Uint8Array<ArrayBuffer>;
+                dataArray = new Uint8Array(analyser.frequencyBinCount);
 
                 const detectSpeaking = () => {
-                    analyser.getByteFrequencyData(dataArray as Uint8Array<ArrayBuffer>);
+                    (analyser.getByteFrequencyData as (arr: Uint8Array) => void)(dataArray as unknown as Uint8Array);
                     const average = dataArray.reduce((sum, value) => sum + value, 0) / dataArray.length;
-                    const speaking = average > 15; // Adjusted speaking threshold for better accuracy
+                    const speaking = average > 15;
 
                     if (speaking !== isSpeakingRef.current) {
                         isSpeakingRef.current = speaking;
-                        updateSpeakingStatus(speaking);
+                        const now = Date.now();
+                        if (now - lastDbUpdateRef.current > DB_UPDATE_INTERVAL) {
+                            lastDbUpdateRef.current = now;
+                            updateSpeakingStatus(speaking);
+                        }
                     }
                     animationFrameId = requestAnimationFrame(detectSpeaking);
                 };
@@ -268,135 +287,145 @@ export default function RoomPage() {
     }, [user?.uid, roomId, monitorOn]);
 
     // WebRTC connection management
-useEffect(() => {
-    if (!user || !roomId || !audioStreamRef.current || !room?.players) return;
+    useEffect(() => {
+        if (!user || !roomId || !audioStreamRef.current || !room?.players) return;
 
-    const myId = user.uid;
-    const roomRef = doc(db, "rooms", roomId);
-    const signalingCollection = collection(roomRef, 'signaling');
-    const pcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
-    const localPeerConnections = { ...peerConnectionsRef.current };
+        const myId = user.uid;
+        const roomRef = doc(db, "rooms", roomId);
+        const signalingCollection = collection(roomRef, 'signaling');
+        const pcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }], iceCandidatePoolSize: 8 };
+        const localPeerConnections = { ...peerConnectionsRef.current };
 
-    const createPeerConnection = (peerId: string, initiator: boolean) => {
-        if (localPeerConnections[peerId]) return localPeerConnections[peerId];
+        const createPeerConnection = (peerId: string, initiator: boolean) => {
+            if (localPeerConnections[peerId]) return localPeerConnections[peerId];
 
-        const pc = new RTCPeerConnection(pcConfig);
-        localPeerConnections[peerId] = pc;
+            const pc = new RTCPeerConnection(pcConfig);
+            localPeerConnections[peerId] = pc;
 
-        audioStreamRef.current?.getTracks().forEach(track => pc.addTrack(track, audioStreamRef.current!));
-
-        pc.ontrack = (event) => {
-            setRemoteStreams(prev => {
-                if (prev[peerId] !== event.streams[0]) {
-                    return { ...prev, [peerId]: event.streams[0] };
-                }
-                return prev;
-            });
-        };
-
-        pc.onicecandidate = event => {
-            if (event.candidate) {
-                addDoc(signalingCollection, { from: myId, to: peerId, signal: { type: 'candidate', candidate: event.candidate.toJSON() } });
-            }
-        };
-
-        if (initiator) {
-            let makingOffer = false;
-            pc.onnegotiationneeded = async () => {
-                if (makingOffer) {
-                    return;
-                }
+            audioStreamRef.current?.getTracks().forEach(track => pc.addTrack(track, audioStreamRef.current!));
+            pc.getSenders().forEach(s => {
                 try {
-                    makingOffer = true;
-                    if (pc.signalingState === 'stable') {
-                        const offer = await pc.createOffer();
-                        await pc.setLocalDescription(offer);
-                        await addDoc(signalingCollection, { from: myId, to: peerId, signal: { type: 'offer', sdp: pc.localDescription?.sdp } });
+                    if (s.track && s.track.kind === 'audio') {
+                        const p = s.getParameters();
+                        p.encodings = [{ maxBitrate: 32000 }];
+                        s.setParameters(p).catch(() => {});
                     }
-                } catch (err) { 
-                    console.error(`[${myId}] Create offer error to ${peerId}:`, err); 
-                } finally {
-                    makingOffer = false;
+                } catch {}
+            });
+        
+
+            pc.ontrack = (event) => {
+                setRemoteStreams(prev => {
+                    if (prev[peerId] !== event.streams[0]) {
+                        return { ...prev, [peerId]: event.streams[0] };
+                    }
+                    return prev;
+                });
+            };
+
+            pc.onicecandidate = event => {
+                if (event.candidate) {
+                    addDoc(signalingCollection, { from: myId, to: peerId, signal: { type: 'candidate', candidate: event.candidate.toJSON() } });
                 }
             };
-        }
-        return pc;
-    };
 
-    const playerIds = room.playerIds.filter(id => id !== myId);
-
-    playerIds.forEach(peerId => {
-        const isInitiator = myId < peerId;
-        createPeerConnection(peerId, isInitiator);
-    });
-
-    Object.keys(localPeerConnections).forEach(peerId => {
-        if (!playerIds.includes(peerId)) {
-            localPeerConnections[peerId].close();
-            delete localPeerConnections[peerId];
-        }
-    });
-
-    peerConnectionsRef.current = localPeerConnections;
-
-    const q = query(signalingCollection, where("to", "==", myId));
-    const signalingUnsubscribe = onSnapshot(q, async (snapshot) => {
-        for (const change of snapshot.docChanges()) {
-            if (change.type === "added") {
-                const signalDoc = change.doc;
-                const { from: fromId, signal } = signalDoc.data();
-                const pc = peerConnectionsRef.current[fromId];
-
-                if (!pc) {
-                    await deleteDoc(signalDoc.ref);
-                    continue;
-                }
-
-                try {
-                    if (signal.type === 'offer') {
-                        if (pc.signalingState !== 'stable') {
-                           console.warn(`[${myId}] Ignoring offer from ${fromId} due to non-stable state: ${pc.signalingState}`);
-                        } else {
-                            await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: signal.sdp }));
-                            const queue = iceCandidateQueues.current[fromId] || [];
-                            for(const candidate of queue) { await pc.addIceCandidate(new RTCIceCandidate(candidate)); }
-                            iceCandidateQueues.current[fromId] = [];
-                            const answer = await pc.createAnswer();
-                            await pc.setLocalDescription(answer);
-                            await addDoc(signalingCollection, { from: myId, to: fromId, signal: { type: 'answer', sdp: pc.localDescription?.sdp } });
-                        }
-                    } else if (signal.type === 'answer') {
-                        if (pc.signalingState === 'have-local-offer') {
-                            await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: signal.sdp }));
-                             const queue = iceCandidateQueues.current[fromId] || [];
-                            for(const candidate of queue) { await pc.addIceCandidate(new RTCIceCandidate(candidate)); }
-                            iceCandidateQueues.current[fromId] = [];
-                        } else {
-                            console.warn(`[${myId}] Received answer from ${fromId} in wrong state: ${pc.signalingState}`);
-                        }
-                    } else if (signal.candidate) {
-                       if (pc.remoteDescription) {
-                           await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
-                       } else {
-                           if (!iceCandidateQueues.current[fromId]) iceCandidateQueues.current[fromId] = [];
-                           iceCandidateQueues.current[fromId].push(signal.candidate);
-                       }
+            if (initiator) {
+                let makingOffer = false;
+                pc.onnegotiationneeded = async () => {
+                    if (makingOffer) {
+                        return;
                     }
-                } catch (err) {
-                    console.error(`Error processing signal type ${signal.type} from ${fromId}:`, err);
-                }
-                
-                await deleteDoc(signalDoc.ref);
+                    try {
+                        makingOffer = true;
+                        if (pc.signalingState === 'stable') {
+                            const offer = await pc.createOffer();
+                            await pc.setLocalDescription(offer);
+                            await addDoc(signalingCollection, { from: myId, to: peerId, signal: { type: 'offer', sdp: pc.localDescription?.sdp } });
+                        }
+                    } catch (err) { 
+                        console.error(`[${myId}] Create offer error to ${peerId}:`, err); 
+                    } finally {
+                        makingOffer = false;
+                    }
+                };
             }
-        }
-    });
+            return pc;
+        };
 
-    return () => {
-        signalingUnsubscribe();
-        Object.values(peerConnectionsRef.current).forEach(pc => pc.close());
-        peerConnectionsRef.current = {};
-    };
-}, [roomId, user, room?.playerIds.sort().join(','), audioStreamRef.current]);
+        const playerIds = room.playerIds.filter(id => id !== myId);
+
+        playerIds.forEach(peerId => {
+            const isInitiator = myId < peerId;
+            createPeerConnection(peerId, isInitiator);
+        });
+
+        Object.keys(localPeerConnections).forEach(peerId => {
+            if (!playerIds.includes(peerId)) {
+                localPeerConnections[peerId].close();
+                delete localPeerConnections[peerId];
+            }
+        });
+
+        peerConnectionsRef.current = localPeerConnections;
+
+        const q = query(signalingCollection, where("to", "==", myId));
+        const signalingUnsubscribe = onSnapshot(q, async (snapshot) => {
+            for (const change of snapshot.docChanges()) {
+                if (change.type === "added") {
+                    const signalDoc = change.doc;
+                    const { from: fromId, signal } = signalDoc.data();
+                    const pc = peerConnectionsRef.current[fromId];
+
+                    if (!pc) {
+                        await deleteDoc(signalDoc.ref);
+                        continue;
+                    }
+
+                    try {
+                        if (signal.type === 'offer') {
+                            if (pc.signalingState !== 'stable') {
+                               console.warn(`[${myId}] Ignoring offer from ${fromId} due to non-stable state: ${pc.signalingState}`);
+                            } else {
+                                await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: signal.sdp }));
+                                const queue = iceCandidateQueues.current[fromId] || [];
+                                for(const candidate of queue) { await pc.addIceCandidate(new RTCIceCandidate(candidate)); }
+                                iceCandidateQueues.current[fromId] = [];
+                                const answer = await pc.createAnswer();
+                                await pc.setLocalDescription(answer);
+                                await addDoc(signalingCollection, { from: myId, to: fromId, signal: { type: 'answer', sdp: pc.localDescription?.sdp } });
+                            }
+                        } else if (signal.type === 'answer') {
+                            if (pc.signalingState === 'have-local-offer') {
+                                await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: signal.sdp }));
+                                 const queue = iceCandidateQueues.current[fromId] || [];
+                                for(const candidate of queue) { await pc.addIceCandidate(new RTCIceCandidate(candidate)); }
+                                iceCandidateQueues.current[fromId] = [];
+                            } else {
+                                console.warn(`[${myId}] Received answer from ${fromId} in wrong state: ${pc.signalingState}`);
+                            }
+                        } else if (signal.candidate) {
+                           if (pc.remoteDescription) {
+                               await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
+                           } else {
+                               if (!iceCandidateQueues.current[fromId]) iceCandidateQueues.current[fromId] = [];
+                               iceCandidateQueues.current[fromId].push(signal.candidate);
+                           }
+                        }
+                    } catch (err) {
+                        console.error(`Error processing signal type ${signal.type} from ${fromId}:`, err);
+                    }
+                    
+                    await deleteDoc(signalDoc.ref);
+                }
+            }
+        });
+
+        return () => {
+            signalingUnsubscribe();
+            Object.values(peerConnectionsRef.current).forEach(pc => pc.close());
+            peerConnectionsRef.current = {};
+        };
+    }, [roomId, user, room?.playerIds.sort().join(','), audioStreamRef.current]);
     
     useEffect(() => {
         chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -837,45 +866,56 @@ useEffect(() => {
             </header>
 
             <main className="flex-grow flex flex-col lg:flex-row gap-4 min-h-0">
-                <section className="flex-grow grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                <section className={cn(
+                    "flex-grow grid gap-4",
+                    isChatVisible ? "grid-cols-2 md:grid-cols-3 lg:grid-cols-4" : "grid-cols-2 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8"
+                )}>
                     {renderPlayerSlots()}
                 </section>
-                <aside className="w-full lg:max-w-sm bg-black/50 backdrop-blur-sm rounded-md flex flex-col p-4 min-h-0 overflow-hidden h-[70vh] lg:h-[calc(100vh-200px)]">
-                    <h3 className="text-lg font-bold mb-4 flex items-center gap-2 flex-shrink-0"><MessageSquare /> Chat</h3>
-                    <div className="flex-1 overflow-y-auto mb-4 space-y-3 pr-2 text-sm custom-scrollbar min-h-0 overscroll-contain">
-                       {room.chatMessages.map((msg, i) => (
-                           <div key={i} className={cn("flex flex-col w-full", msg.senderUID === myUid ? "items-end" : "items-start")}>
-                               <div className={cn("max-w-[90%] rounded-lg px-3 py-2", msg.senderUID === myUid ? "bg-primary text-primary-foreground" : "bg-zinc-700")}>
-                                   {msg.senderUID !== user.uid && <p className="text-xs font-bold text-blue-400 mb-1">{msg.sender}</p>}
-                                   <p className="text-sm break-words">{msg.text}</p>
-                               </div>
-                               <span className="text-xs text-zinc-500 mt-1 px-1">
-                                   {msg.timestamp?.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                               </span>
-                           </div>
-                       ))}
-                       <div ref={chatEndRef} />
-                    </div>
-                    <div className="flex gap-2 flex-shrink-0">
-                        <Textarea 
-                            placeholder="Type a message..." 
-                            value={chatMessage} 
-                            onChange={e => setChatMessage(e.target.value)} 
-                            onKeyDown={e => {
-                                if (e.key === 'Enter' && !e.shiftKey) {
-                                    e.preventDefault();
-                                    handleSendMessage();
-                                }
-                            }}
-                            rows={1}
-                        />
-                        <Button onClick={handleSendMessage} size="icon"><Send className="w-4 h-4"/></Button>
-                    </div>
-                </aside>
+                {isChatVisible && (
+                    <aside className="w-full lg:max-w-sm bg-black/50 backdrop-blur-sm rounded-md flex flex-col p-4 min-h-0 overflow-hidden h-[70vh] lg:h-[calc(100vh-200px)]">
+                        <h3 className="text-lg font-bold mb-4 flex items-center gap-2 flex-shrink-0"><MessageSquare /> Chat</h3>
+                        <div className="flex-1 overflow-y-auto mb-4 space-y-3 pr-2 text-sm custom-scrollbar min-h-0 overscroll-contain">
+                        {room.chatMessages.map((msg, i) => (
+                            <div key={i} className={cn("flex flex-col w-full", msg.senderUID === myUid ? "items-end" : "items-start")}>
+                                <div className={cn("max-w-[90%] rounded-lg px-3 py-2", msg.senderUID === myUid ? "bg-primary text-primary-foreground" : "bg-zinc-700")}>
+                                    {msg.senderUID !== user.uid && <p className="text-xs font-bold text-blue-400 mb-1">{msg.sender}</p>}
+                                    <p className="text-sm break-words">{msg.text}</p>
+                                </div>
+                                <span className="text-xs text-zinc-500 mt-1 px-1">
+                                    {msg.timestamp?.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                </span>
+                            </div>
+                        ))}
+                        <div ref={chatEndRef} />
+                        </div>
+                        <div className="flex gap-2 flex-shrink-0">
+                            <Textarea 
+                                placeholder="Type a message..." 
+                                value={chatMessage} 
+                                onChange={e => setChatMessage(e.target.value)} 
+                                onKeyDown={e => {
+                                    if (e.key === 'Enter' && !e.shiftKey) {
+                                        e.preventDefault();
+                                        handleSendMessage();
+                                    }
+                                }}
+                                rows={1}
+                            />
+                            <Button onClick={handleSendMessage} size="icon"><Send className="w-4 h-4"/></Button>
+                        </div>
+                    </aside>
+                )}
             </main>
 
             <footer className="flex-shrink-0 bg-black/50 backdrop-blur-sm p-3 rounded-md mt-4 flex flex-wrap justify-between items-center gap-2">
-                <Button variant="destructive" onClick={handleLeaveRoom}>Leave Room</Button>
+                <div className="flex items-center gap-2">
+                    <Button variant="destructive" onClick={handleLeaveRoom}>Leave Room</Button>
+                    <Button variant="outline" onClick={() => setIsChatVisible(v => !v)}>
+                        <MessageSquare className="h-4 w-4 mr-2" />
+                        {isChatVisible ? 'Hide Chat' : 'Show Chat'}
+                    </Button>
+                </div>
                 <div className="flex items-center gap-2 flex-wrap justify-end">
                     <Button variant="outline" onClick={() => setMonitorOn(v => !v)}>
                         {monitorOn ? 'Mic Monitor: On' : 'Mic Monitor: Off'}
