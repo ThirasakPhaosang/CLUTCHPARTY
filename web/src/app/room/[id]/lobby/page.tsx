@@ -365,8 +365,13 @@ remoteStreamAnalyzersRef.current.set(peerId, { analyser, dataArray, animationFra
             pc.ontrack = (event) => {
                 const stream = event.streams[0];
                 const audioEl = remoteAudioElementsRef.current.get(peerId) || new Audio();
+                audioEl.autoplay = true;
+                // iOS inline playback
+                try { audioEl.setAttribute('playsinline', 'true'); } catch {}
+                audioEl.muted = false;
                 audioEl.srcObject = stream;
-                audioEl.play().catch(e => console.error("Audio play failed", e));
+                audioEl.oncanplay = () => { try { audioEl.play(); } catch {} };
+                audioEl.play().catch(() => {});
                 remoteAudioElementsRef.current.set(peerId, audioEl);
                 analyzeRemoteStream(stream, peerId);
             };
@@ -458,7 +463,13 @@ remoteStreamAnalyzersRef.current.set(peerId, { analyser, dataArray, animationFra
                            }
                         }
                     } catch (err) { 
-                        console.error("Signaling error:", err);
+                        // Swallow benign InvalidState/Operation race errors from renegotiation
+                        const name = (typeof err === 'object' && err && 'name' in (err as object))
+                          ? ((err as { name?: string }).name ?? '')
+                          : '';
+                        if (name !== 'InvalidStateError' && name !== 'OperationError') {
+                          console.warn("Signaling error:", err);
+                        }
                     }
                     await deleteDoc(change.doc.ref);
                 }
@@ -807,30 +818,12 @@ toast.error("Failed to send friend request.");
     };
     
     const isHost = user?.uid === room?.host.uid;
-useEffect(() => {
-        if (!isHost || !room || !user) return;
-    
-        const DISCONNECT_THRESHOLD_MS = 45000; // 45 seconds
-        const checkInterval = setInterval(() => {
-            const now = Date.now();
-            const roomRef = doc(db, "rooms", roomId);
-    
-            runTransaction(db, async (transaction) => {
- 
-               const roomDoc = await transaction.get(roomRef);
-                if (!roomDoc.exists()) return;
-
-                // Placeholder for future disconnect check implementation
-                // Consider implementing this in a cloud function instead
-            }).catch(err => {
-   
-             console.warn("Error in disconnect check transaction:", err);
-            });
-    
-        }, 15000); // Check every 15 seconds
-    
-        return () => clearInterval(checkInterval);
-    }, [isHost, room?.players, user?.uid, roomId]);
+    // Disable noisy read-only transaction placeholder; implement in backend if needed
+    // useEffect(() => {
+    //   if (!isHost || !room || !user) return;
+    //   const checkInterval = setInterval(() => { /* noop */ }, 15000);
+    //   return () => clearInterval(checkInterval);
+    // }, [isHost, room?.players, user?.uid, roomId]);
 if (loading || !room || !user) {
         return <div className="flex items-center justify-center min-h-screen bg-zinc-900"><LoaderCircle className="h-8 w-8 animate-spin text-green-400" /></div>;
 }
