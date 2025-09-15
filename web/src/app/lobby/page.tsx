@@ -673,7 +673,7 @@ const RoomList: FC<{ user: User | null, userProfile: UserProfile | null }> = ({ 
   const handleJoinClick = (room: GameRoom) => {
     const players = Array.isArray(room.players) ? room.players : Object.values(((room as unknown) as Record<string, unknown>).players as Record<string, Player> || {});
     if (players.some(p => p.uid === user?.uid)) {
-        router.push(`/room/${room.id}`);
+        router.push(`/room/${room.id}/lobby`);
         return;
     }
     if (room.hasPassword) {
@@ -733,7 +733,7 @@ const RoomList: FC<{ user: User | null, userProfile: UserProfile | null }> = ({ 
           });
         }
       });
-      router.push(`/room/${room.id}`);
+      router.push(`/room/${room.id}/lobby`);
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : String(error);
       console.error("Error joining room: ", error);
@@ -990,6 +990,7 @@ export default function LobbyPage() {
     </div>
   );
 }
+
 
 
 

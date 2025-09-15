@@ -86,8 +86,6 @@ export default function GamePage() {
     const [speakingPeers, setSpeakingPeers] = useState<Record<string, boolean>>({});
     const remoteAudioContextRef = useRef<AudioContext | null>(null);
     const remoteAnalyzersRef = useRef<Map<string, { analyser: AnalyserNode, dataArray: Uint8Array<ArrayBuffer>, rafId: number }>>(new Map());
-    const makingOfferRef = useRef<Record<string, boolean>>({});
-    const ignoreOfferRef = useRef<Record<string, boolean>>({});
     const iceCandidateQueues = useRef<{ [key: string]: RTCIceCandidateInit[] }>({});
     // removed unused lastDbUpdateRef
 
