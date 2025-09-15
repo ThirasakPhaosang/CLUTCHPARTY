@@ -329,6 +329,17 @@ useEffect(() => {
               setRemoteStreams(prev => ({ ...prev, [peerId]: stream }));
             };
             pc.onicecandidate = e => e.candidate && addDoc(signalingCollection, { from: myId, to: peerId, signal: { type: 'candidate', candidate: e.candidate.toJSON() } });
+            pc.oniceconnectionstatechange = async () => {
+                const st = pc.iceConnectionState;
+                if ((st === 'failed' || st === 'disconnected') && initiator) {
+                    try {
+                        if (pc.signalingState === 'stable') {
+                            await pc.setLocalDescription(await pc.createOffer({ iceRestart: true }));
+                            await addDoc(signalingCollection, { from: myId, to: peerId, signal: { type: 'offer', sdp: pc.localDescription?.sdp } });
+                        }
+                    } catch {}
+                }
+            };
             // Negotiation: only the chosen initiator proactively creates offers to reduce glare
             if (initiator) {
               pc.onnegotiationneeded = async () => {
