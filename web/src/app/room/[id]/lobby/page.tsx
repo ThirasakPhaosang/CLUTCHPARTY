@@ -350,7 +350,9 @@ remoteStreamAnalyzersRef.current.set(peerId, { analyser, dataArray, animationFra
 
     // FIXED: WebRTC connection management using Perfect Negotiation Pattern
     useEffect(() => {
-        if (!user || !roomId || !audioStreamRef.current || !room?.players) return;
+        // Start signaling only after user is a member of the room
+        const isMember = !!room?.playerIds && !!room?.playerIds[user?.uid || ''];
+        if (!user || !roomId || !audioStreamRef.current || !room?.players || !isMember) return;
         
         const myId = user.uid;
         const roomRef = doc(db, "rooms", roomId);
@@ -474,6 +476,8 @@ remoteStreamAnalyzersRef.current.set(peerId, { analyser, dataArray, animationFra
                     await deleteDoc(change.doc.ref);
                 }
             });
+        }, (err) => {
+            console.warn('Signaling listen error', err);
         });
 
         return () => { 

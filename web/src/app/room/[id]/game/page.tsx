@@ -308,7 +308,9 @@ useEffect(() => {
     }, [remoteStreams]);
 
     useEffect(() => {
-        if (!user || !roomId || !audioStreamRef.current || !room?.players) return;
+        // Start signaling only after mic ready and the user is a member of the room
+        const isMember = !!room?.playerIds && !!room.playerIds[user?.uid || ''];
+        if (!user || !roomId || !audioStreamRef.current || !room?.players || !isMember) return;
         const myId = user.uid;
         const roomRef = doc(db, "rooms", roomId);
         const signalingCollection = collection(roomRef, 'signaling');
@@ -412,6 +414,9 @@ useEffect(() => {
                     await deleteDoc(change.doc.ref);
                 }
             }
+        }, (err) => {
+          // Avoid crashing on permission/network blips
+          console.warn('Signaling listen error', err);
         });
         return () => { unsub(); Object.values(peerConnectionsRef.current).forEach(pc => pc.close()); peerConnectionsRef.current = {}; };
     }, [roomId, user, Object.keys(room?.playerIds || {}).sort().join(','), audioStreamRef.current]);
