@@ -1076,6 +1076,7 @@ export default function LobbyPage() {
         // Clean up previous user's listeners and intervals
         if (unsubProfile) unsubProfile();
         if (heartbeatInterval) clearInterval(heartbeatInterval);
+        if (!currentUser) { router.replace('/login'); setLoading(false); return; }
 
         if (currentUser) {
             setUser(currentUser);
@@ -1115,8 +1116,6 @@ export default function LobbyPage() {
             } else {
                 setUserProfile(userDocSnap.data() as UserProfile)
             }
-        } else { 
-            router.push('/'); 
         }
         setLoading(false);
     });
@@ -1141,12 +1140,17 @@ export default function LobbyPage() {
 
 
   const handleProfileCreated = (profile: UserProfile) => setUserProfile(profile);
-  const handleSignOut = async () => { 
-    if (user) {
-        await updateDoc(doc(db, "users", user.uid), { status: 'offline', lastSeen: serverTimestamp() });
+  const handleSignOut = async () => {
+    try {
+      if (user) {
+        await updateDoc(doc(db, 'users', user.uid), { status: 'offline', lastSeen: serverTimestamp() });
+      }
+    } catch (_) {
+      // ignore network/stream closing errors during sign-out
+    } finally {
+      try { await signOut(auth); } catch {}
+      router.replace('/login');
     }
-    await signOut(auth);
-    router.push('/'); 
   };
 
   if (loading || !user || !userProfile) {

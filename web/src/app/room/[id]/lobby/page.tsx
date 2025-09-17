@@ -230,8 +230,8 @@ const [audioUnlocked, setAudioUnlocked] = useState<boolean>(false);
     }, []);
 
 useEffect(() => {
-        const authUnsubscribe = onAuthStateChanged(auth, (currentUser) => {
-            if (!currentUser) { router.push('/'); return; }
+        const authUnsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+            if (!currentUser) { router.replace('/login'); return; }
             setUser(currentUser);
             const userDocRef = doc(db, "users", currentUser.uid);
             const userUnsubscribe = onSnapshot(userDocRef, (docSnap) => {

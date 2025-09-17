@@ -118,7 +118,7 @@ export default function GamePage() {
             if (currentUser) {
                 setUser(currentUser);
             } else {
-                router.push('/');
+                router.replace('/login');
             }
         });
         return () => unsubscribe();
