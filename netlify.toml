@@ -8,3 +8,13 @@
 
 [[plugins]]
   package = "@netlify/plugin-nextjs"
+
+# Explicit CSP for production on Netlify (overrides defaults)
+# Note: Keep permissive for inline scripts required by Next runtime.
+[[headers]]
+  for = "/*"
+  [headers.values]
+    Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self' data:; connect-src 'self' https://*.googleapis.com https://firestore.googleapis.com https://*.googleusercontent.com ws: wss:; media-src 'self' blob:; worker-src 'self' blob:; frame-src 'self'; base-uri 'self'; form-action 'self'"
+    X-Content-Type-Options = "nosniff"
+    X-Frame-Options = "DENY"
+    Referrer-Policy = "strict-origin-when-cross-origin"
