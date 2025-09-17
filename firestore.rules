@@ -1,0 +1,91 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ---------- Helpers ----------
+    function isSignedIn() { return request.auth != null; }
+    function roomDoc(roomId) { return get(/databases/$(database)/documents/rooms/$(roomId)); }
+    function roomExists(roomId) { return exists(/databases/$(database)/documents/rooms/$(roomId)); }
+    function isPlayerInRoom(roomId) { return isSignedIn() && roomExists(roomId) && (request.auth.uid in roomDoc(roomId).data.playerIds); }
+    function isHostOfRoom(roomId) { return roomExists(roomId) && request.auth.uid == roomDoc(roomId).data.host.uid; }
+    function changedOnly(allowed) { return request.resource.data.diff(resource.data).changedKeys().hasOnly(allowed); }
+    function mapAddedOne(before, after, key) { return before != null && after != null && after.size() == before.size() + 1 && !(key in before) && (key in after); }
+    function mapRemovedOne(before, after, key) { return before != null && after != null && after.size() == before.size() - 1 && (key in before) && !(key in after); }
+    function isJoinOpen(roomId) { return roomDoc(roomId).data.status == 'waiting' || roomDoc(roomId).data.status == 'loading'; }
+    function mapSize(m) { return m != null ? m.size() : 0; }
+    function hasKey(m, k) { return m != null && (k in m); }
+
+    // ---------- Collections ----------
+
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn() && request.auth.uid == userId;
+    }
+
+    match /friendRequests/{id} {
+      // Read only for involved users
+      allow read: if isSignedIn() && (request.auth.uid == resource.data.from.uid || request.auth.uid == resource.data.to.uid);
+      allow create: if isSignedIn() && request.resource.data.from.uid == request.auth.uid;
+      allow delete: if isSignedIn() && (request.auth.uid == resource.data.from.uid || request.auth.uid == resource.data.to.uid);
+      allow update: if false;
+    }
+
+    match /invitations/{id} {
+      allow read: if isSignedIn() && (request.auth.uid == resource.data.from.uid || request.auth.uid == resource.data.to.uid);
+      allow create: if isSignedIn() && request.resource.data.from.uid == request.auth.uid && isHostOfRoom(request.resource.data.roomId);
+      allow delete: if isSignedIn() && (request.auth.uid == resource.data.from.uid || request.auth.uid == resource.data.to.uid);
+      allow update: if false;
+    }
+
+    match /rooms/{roomId} {
+      // Read room doc if logged in
+      allow read: if isSignedIn();
+
+      // Create room: creator is host
+      allow create: if isSignedIn() && request.resource.data.host.uid == request.auth.uid;
+
+      // Update room doc
+      allow update: if
+        // (A) Host can update anything on the room doc
+        isHostOfRoom(roomId)
+        ||
+        // (B) Join: add playerIds.{uid} only while room is joinable
+        (
+          isSignedIn() && isJoinOpen(roomId)
+          && !(request.auth.uid in resource.data.playerIds)
+          && mapAddedOne(resource.data.playerIds, request.resource.data.playerIds, request.auth.uid)
+          && changedOnly(['playerIds'])
+        )
+        ||
+        // (C) Leave: remove playerIds.{uid}; host may also change
+        (
+          isSignedIn() && (request.auth.uid in resource.data.playerIds)
+          && mapRemovedOne(resource.data.playerIds, request.resource.data.playerIds, request.auth.uid)
+          && changedOnly(['playerIds', 'host'])
+        )
+        ||
+        // (D) Chat: members may append (arrayUnion) or add updatedAt
+        (
+          isPlayerInRoom(roomId)
+          && request.resource.data.diff(resource.data).changedKeys().hasOnly(['chatMessages', 'updatedAt'])
+        );
+
+      // Delete room: host or last remaining member
+      allow delete: if isHostOfRoom(roomId) || (isSignedIn() && mapSize(resource.data.playerIds) <= 1 && hasKey(resource.data.playerIds, request.auth.uid));
+
+      // WebRTC signaling scoped to room members
+      match /signaling/{signalId} {
+        allow read, write, delete: if isPlayerInRoom(roomId);
+      }
+
+      // Players subcollection (authoritative player states)
+      match /players/{playerUid} {
+        // Readable by room members or host (host may not yet be in playerIds at creation time)
+        allow read: if isPlayerInRoom(roomId) || isHostOfRoom(roomId);
+        // Player can create/update their own doc while in room
+        allow create, update: if isSignedIn() && request.auth.uid == playerUid && isPlayerInRoom(roomId);
+        // Delete own doc, or host can delete any (kick)
+        allow delete: if (isSignedIn() && request.auth.uid == playerUid && isPlayerInRoom(roomId)) || isHostOfRoom(roomId);
+      }
+    }
+  }
+}

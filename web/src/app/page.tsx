@@ -4,34 +4,29 @@
 */
 "use client";
 
-import React, { useState, useEffect, FC, forwardRef, HTMLAttributes, InputHTMLAttributes, ButtonHTMLAttributes, LabelHTMLAttributes } from 'react';
+import React, { useState, useEffect, FC, forwardRef, HTMLAttributes, InputHTMLAttributes, ButtonHTMLAttributes } from 'react';
 import { useRouter } from 'next/navigation';
-import { auth, db } from '../lib/firebase';
-import { doc, setDoc, serverTimestamp, getDoc, updateDoc } from 'firebase/firestore';
+import { auth, db } from '@/lib/firebase';
+import { onAuthStateChanged, signOut, User } from 'firebase/auth';
+import { doc, getDoc, updateDoc, collection, query, where, getDocs, setDoc, serverTimestamp, onSnapshot, addDoc, Timestamp, writeBatch, deleteDoc, runTransaction, arrayUnion } from "firebase/firestore";
 import { toast } from "sonner";
+import { UserProfile, FriendRequest, GameRoom, GameInvite, Player } from "@/lib/types";
 
-// Firebase imports
-import { 
-  onAuthStateChanged, 
-  signInWithEmailAndPassword, 
-  createUserWithEmailAndPassword,
-  signInAnonymously, 
-  signInWithPopup, 
-  GoogleAuthProvider,
-  User
-} from 'firebase/auth';
+import * as DialogPrimitive from "@radix-ui/react-dialog";
+import * as SliderPrimitive from "@radix-ui/react-slider";
+import * as SwitchPrimitives from "@radix-ui/react-switch";
+import * as TabsPrimitive from "@radix-ui/react-tabs";
 
 import { cva, type VariantProps } from "class-variance-authority";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
-import { Mail, KeyRound, LoaderCircle } from "lucide-react";
+import { LogOut, LoaderCircle, Users, Lock, Search, PlusCircle, UsersRound, Gamepad2, UserPlus, Check, X, Hourglass, MailQuestion, Bell, Pencil } from "lucide-react";
 
-// --- UTILS ---
+// --- UTILS & COMPONENTS ---
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-// --- UI COMPONENTS ---
 const buttonVariants = cva(
   "inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50",
   {
@@ -42,312 +37,1152 @@ const buttonVariants = cva(
         outline: "border border-input bg-background hover:bg-accent hover:text-accent-foreground",
         secondary: "bg-secondary text-secondary-foreground hover:bg-secondary/80",
         ghost: "hover:bg-accent hover:text-accent-foreground",
-        link: "text-primary underline-offset-4 hover:underline",
       },
       size: {
         default: "h-10 px-4 py-2",
         sm: "h-9 rounded-md px-3",
-        lg: "h-11 rounded-md px-8",
         icon: "h-10 w-10",
       },
     },
-    defaultVariants: {
-      variant: "default",
-      size: "default",
-    },
+    defaultVariants: { variant: "default", size: "default" },
   }
-)
+);
 
-export type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> &
-  VariantProps<typeof buttonVariants> & {
-    asChild?: boolean;
-  };
-
+type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & VariantProps<typeof buttonVariants>;
 const Button = forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ className, variant, size, ...props }, ref) => {
-    return (
-      <button
-        className={cn(buttonVariants({ variant, size, className }))}
-        ref={ref}
-        {...props}
-      />
-    );
-  }
+  ({ className, variant, size, ...props }, ref) => (
+    <button className={cn(buttonVariants({ variant, size, className }))} ref={ref} {...props} />
+  )
 );
 Button.displayName = "Button";
 
 const Card = forwardRef<HTMLDivElement, HTMLAttributes<HTMLDivElement>>(
-  ({ className, ...props }, ref) => (
-    <div
-      ref={ref}
-      className={cn("rounded-lg border bg-card text-card-foreground shadow-sm", className)}
-      {...props}
-    />
-  )
+  ({ className, ...props }, ref) => (<div ref={ref} className={cn("rounded-lg border bg-card text-card-foreground shadow-sm", className)} {...props} />)
 );
 Card.displayName = "Card";
 
 const CardHeader = forwardRef<HTMLDivElement, HTMLAttributes<HTMLDivElement>>(
-  ({ className, ...props }, ref) => (
-    <div ref={ref} className={cn("flex flex-col space-y-1.5 p-6", className)} {...props} />
-  )
+  ({ className, ...props }, ref) => (<div ref={ref} className={cn("flex flex-col space-y-1.5 p-6", className)} {...props} />)
 );
 CardHeader.displayName = "CardHeader";
 
-const CardTitle = forwardRef<HTMLHeadingElement, HTMLAttributes<HTMLHeadingElement>>(
-  ({ className, ...props }, ref) => (
-    <h3 ref={ref} className={cn("text-2xl font-semibold leading-none tracking-tight", className)} {...props} />
-  )
+const CardTitle = forwardRef<HTMLParagraphElement, HTMLAttributes<HTMLHeadingElement>>(
+  ({ className, ...props }, ref) => (<h3 ref={ref} className={cn("text-lg font-semibold leading-none tracking-tight", className)} {...props} />)
 );
 CardTitle.displayName = "CardTitle";
 
-const CardDescription = forwardRef<HTMLParagraphElement, HTMLAttributes<HTMLParagraphElement>>(
-  ({ className, ...props }, ref) => (
-    <p ref={ref} className={cn("text-sm text-muted-foreground", className)} {...props} />
-  )
-);
-CardDescription.displayName = "CardDescription";
-
 const CardContent = forwardRef<HTMLDivElement, HTMLAttributes<HTMLDivElement>>(
-  ({ className, ...props }, ref) => (
-    <div ref={ref} className={cn("p-6 pt-0", className)} {...props} />
-  )
+  ({ className, ...props }, ref) => (<div ref={ref} className={cn("p-6 pt-0", className)} {...props} />)
 );
 CardContent.displayName = "CardContent";
 
-type InputProps = InputHTMLAttributes<HTMLInputElement>;
-
-const Input = forwardRef<HTMLInputElement, InputProps>(
-  ({ className, type, ...props }, ref) => {
-    return (
-      <input
-        type={type}
-        className={cn(
-          "flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50",
-          className
-        )}
-        ref={ref}
-        {...props}
-      />
-    );
-  }
+const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(
+  ({ className, type, ...props }, ref) => (<input type={type} className={cn("flex h-10 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50", className)} ref={ref} {...props} />)
 );
 Input.displayName = "Input";
 
-const Label = forwardRef<HTMLLabelElement, LabelHTMLAttributes<HTMLLabelElement>>(
-  ({ className, ...props }, ref) => (
-    <label
-      ref={ref}
-      className={cn(
-        "text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70",
-        className
-      )}
-      {...props}
-    />
-  )
+const Label = forwardRef<React.ElementRef<"label">, React.ComponentPropsWithoutRef<"label">>(
+  ({ className, ...props }, ref) => (<label ref={ref} className={cn("text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70", className)} {...props} />)
 );
 Label.displayName = "Label";
 
-// --- FIREBASE CONFIG & INIT ---
-const googleProvider = new GoogleAuthProvider();
+const Slider = forwardRef<React.ElementRef<typeof SliderPrimitive.Root>, React.ComponentPropsWithoutRef<typeof SliderPrimitive.Root>>(({ className, ...props }, ref) => (
+  <SliderPrimitive.Root ref={ref} className={cn("relative flex w-full touch-none select-none items-center", className)} {...props}>
+    <SliderPrimitive.Track className="relative h-2 w-full grow overflow-hidden rounded-full bg-secondary">
+      <SliderPrimitive.Range className="absolute h-full bg-primary" />
+    </SliderPrimitive.Track>
+    <SliderPrimitive.Thumb className="block h-5 w-5 rounded-full border-2 border-primary bg-background ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50" />
+  </SliderPrimitive.Root>
+));
+Slider.displayName = SliderPrimitive.Root.displayName;
 
-const toMessage = (err: unknown): string => {
-  if (err && typeof err === 'object' && 'message' in err) {
-    const message = (err as { message: string }).message || "An unknown error occurred.";
-    // Clean up Firebase error codes
-    return message.replace(/Firebase: |\(auth\/.*\)\.?/g, '').trim();
-  }
-  return "Something went wrong. Please try again.";
-};
+const Switch = forwardRef<React.ElementRef<typeof SwitchPrimitives.Root>, React.ComponentPropsWithoutRef<typeof SwitchPrimitives.Root>>(({ className, ...props }, ref) => (
+  <SwitchPrimitives.Root className={cn("peer inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-primary data-[state=unchecked]:bg-input", className)} {...props} ref={ref}>
+    <SwitchPrimitives.Thumb className={cn("pointer-events-none block h-5 w-5 rounded-full bg-background shadow-lg ring-0 transition-transform data-[state=checked]:translate-x-5 data-[state=unchecked]:translate-x-0")} />
+  </SwitchPrimitives.Root>
+));
+Switch.displayName = SwitchPrimitives.Root.displayName;
 
-const createOrUpdateUserProfile = async (user: User) => {
-    const userDocRef = doc(db, "users", user.uid);
-    const userDocSnap = await getDoc(userDocRef);
+const Tabs = TabsPrimitive.Root;
+const TabsList = forwardRef<React.ElementRef<typeof TabsPrimitive.List>, React.ComponentPropsWithoutRef<typeof TabsPrimitive.List>>(({ className, ...props }, ref) => (
+  <TabsPrimitive.List ref={ref} className={cn("inline-flex h-10 items-center justify-center rounded-md bg-muted p-1 text-muted-foreground", className)} {...props} />
+));
+TabsList.displayName = TabsPrimitive.List.displayName;
+const TabsTrigger = forwardRef<React.ElementRef<typeof TabsPrimitive.Trigger>, React.ComponentPropsWithoutRef<typeof TabsPrimitive.Trigger>>(({ className, ...props }, ref) => (
+  <TabsPrimitive.Trigger ref={ref} className={cn("inline-flex items-center justify-center whitespace-nowrap rounded-sm px-3 py-1.5 text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm", className)} {...props} />
+));
+TabsTrigger.displayName = TabsPrimitive.Trigger.displayName;
+const TabsContent = forwardRef<React.ElementRef<typeof TabsPrimitive.Content>, React.ComponentPropsWithoutRef<typeof TabsPrimitive.Content>>(({ className, ...props }, ref) => (
+  <TabsPrimitive.Content ref={ref} className={cn("mt-2 ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2", className)} {...props} />
+));
+TabsContent.displayName = TabsPrimitive.Content.displayName;
 
-    if (!userDocSnap.exists()) {
-        const tag = `#${String(Math.floor(1000 + Math.random() * 9000))}`;
-        const isNewEmailUser = !user.isAnonymous && !user.displayName;
-        
-        await setDoc(userDocRef, {
-            uid: user.uid,
-            email: user.email,
-            displayName: user.isAnonymous ? 'Guest' : user.displayName,
-            tag: user.isAnonymous || user.displayName ? tag : null,
-            createdAt: serverTimestamp(),
-            friends: [],
-            status: 'online',
-            lastSeen: serverTimestamp(),
-            profileInitialized: !isNewEmailUser, // Set to false only for new email users
-        });
-    } else {
-        await updateDoc(userDocRef, {
-            status: 'online',
-            lastSeen: serverTimestamp()
-        })
-    }
-}
+const Dialog = DialogPrimitive.Root;
+const DialogPortal = DialogPrimitive.Portal;
+const DialogOverlay = forwardRef<React.ElementRef<typeof DialogPrimitive.Overlay>,React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay>>(({ className, ...props }, ref) => (
+  <DialogPrimitive.Overlay ref={ref} className={cn("fixed inset-0 z-50 bg-black/80",className)} {...props}/>
+))
+DialogOverlay.displayName = DialogPrimitive.Overlay.displayName
+const DialogContent = forwardRef<React.ElementRef<typeof DialogPrimitive.Content>, React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>>(({ className, children, ...props }, ref) => (
+  <DialogPortal>
+    <DialogOverlay />
+    <DialogPrimitive.Content ref={ref} className={cn("fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 border bg-background p-6 shadow-lg duration-200 sm:rounded-lg", className)} {...props}>
+      {children}
+    </DialogPrimitive.Content>
+  </DialogPortal>
+))
+DialogContent.displayName = DialogPrimitive.Content.displayName
+const DialogHeader = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => (
+  <div className={cn("flex flex-col space-y-1.5 text-center sm:text-left", className)} {...props} />
+)
+DialogHeader.displayName = "DialogHeader"
+const DialogTitle = forwardRef< React.ElementRef<typeof DialogPrimitive.Title>, React.ComponentPropsWithoutRef<typeof DialogPrimitive.Title>>(({ className, ...props }, ref) => (
+  <DialogPrimitive.Title ref={ref} className={cn("text-lg font-semibold leading-none tracking-tight", className)} {...props} />
+))
+DialogTitle.displayName = DialogPrimitive.Title.displayName
+const DialogDescription = forwardRef<React.ElementRef<typeof DialogPrimitive.Description>, React.ComponentPropsWithoutRef<typeof DialogPrimitive.Description>>(({ className, ...props }, ref) => (
+  <DialogPrimitive.Description ref={ref} className={cn("text-sm text-muted-foreground", className)} {...props} />
+))
+DialogDescription.displayName = DialogPrimitive.Description.displayName;
 
+// --- LOBBY SUB-COMPONENTS ---
 
-// --- AUTH COMPONENTS ---
+const ProfileSetup: FC<{ user: User; onProfileCreated: (profile: UserProfile) => void }> = ({ user, onProfileCreated }) => {
+  const [displayName, setDisplayName] = useState('');
+  const [error, setError] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+  const tag = `#${String(Math.floor(1000 + Math.random() * 9000))}`;
 
-const LoginPage: FC = () => {
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState<string | null>(null);
-
-  const handleAuthAction = async (action: 'login' | 'signup') => {
-    if (!email || !password) {
-      setError("Please enter both email and password.");
+  const handleSaveProfile = async () => {
+    if (!displayName.trim() || displayName.length < 3) {
+      setError('Display name must be at least 3 characters long.');
       return;
     }
-    setError(null);
-    setLoading(action);
+    setError('');
+    setIsSaving(true);
     try {
-      if (action === 'login') {
-        await signInWithEmailAndPassword(auth, email, password);
-      } else {
-        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-        await createOrUpdateUserProfile(userCredential.user);
-      }
-    } catch (err: unknown) {
-      const msg = toMessage(err);
-      setError(msg);
-      toast.error(msg);
+      const userDocRef = doc(db, "users", user.uid);
+      await updateDoc(userDocRef, { displayName, tag, profileInitialized: true });
+      const updatedDoc = await getDoc(userDocRef);
+      onProfileCreated(updatedDoc.data() as UserProfile);
+    } catch (e) {
+      setError('Failed to save profile. Please try again.');
+      console.error("Error updating profile: ", e);
     } finally {
-      setLoading(null);
-    }
-  };
-
-  const handleGoogleSignIn = async () => {
-    setError(null);
-    setLoading('google');
-    try {
-      const result = await signInWithPopup(auth, googleProvider);
-      await createOrUpdateUserProfile(result.user);
-    } catch (err: unknown) {
-        const msg = toMessage(err);
-        setError(msg);
-        toast.error(msg);
-    } finally {
-      setLoading(null);
-    }
-  };
-
-  const handleAnonymousSignIn = async () => {
-    setError(null);
-    setLoading('anonymous');
-    try {
-        const result = await signInAnonymously(auth);
-        await createOrUpdateUserProfile(result.user);
-    } catch (err: unknown) {
-        const msg = toMessage(err);
-        setError(msg);
-        toast.error(msg);
-    } finally {
-      setLoading(null);
+      setIsSaving(false);
     }
   };
 
   return (
-    <Card className="w-full max-w-sm">
-      <CardHeader>
-        <CardTitle>CLUTCHPARTY</CardTitle>
-        <CardDescription>Sign in to continue</CardDescription>
-      </CardHeader>
-      <CardContent>
-        <div className="space-y-4">
+    <div className="flex items-center justify-center min-h-screen">
+      <Card className="w-full max-w-md">
+        <CardHeader>
+          <CardTitle>Welcome to CLUTCHPARTY!</CardTitle>
+          <p className="text-sm text-muted-foreground">Choose a display name to get started.</p>
+        </CardHeader>
+        <CardContent className="space-y-4">
           <div className="space-y-2">
-            <Label htmlFor="email">Email</Label>
-            <div className="relative">
-              <Mail className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-              <Input 
-                id="email" 
-                type="email" 
-                placeholder="you@example.com" 
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                className="pl-10"
+            <Label htmlFor="displayName">Display Name</Label>
+            <div className="flex items-center gap-2">
+              <Input
+                id="displayName"
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+                placeholder="Your awesome name"
+                maxLength={20}
               />
+              <span className="text-muted-foreground font-semibold whitespace-nowrap">{tag}</span>
             </div>
           </div>
-          <div className="space-y-2">
-            <Label htmlFor="password">Password</Label>
-            <div className="relative">
-              <KeyRound className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-              <Input 
-                id="password" 
-                type="password"
-                placeholder="••••••••"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleAuthAction('login')}
-                className="pl-10"
-              />
-            </div>
-          </div>
-          {error && <p className="text-sm text-destructive text-center">{error}</p>}
-          <div className="flex flex-col space-y-2">
-            <Button onClick={() => handleAuthAction('login')} disabled={!!loading}>
-              {loading === 'login' && <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />}
-              Sign In
-            </Button>
-            <Button variant="secondary" onClick={() => handleAuthAction('signup')} disabled={!!loading}>
-              {loading === 'signup' && <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />}
-              Sign Up
-            </Button>
-          </div>
-          <div className="relative">
-            <div className="absolute inset-0 flex items-center">
-              <span className="w-full border-t" />
-            </div>
-            <div className="relative flex justify-center text-xs uppercase">
-              <span className="bg-background px-2 text-muted-foreground">Or continue with</span>
-            </div>
-          </div>
-          <Button variant="outline" className="w-full" onClick={handleGoogleSignIn} disabled={!!loading}>
-            {loading === 'google' ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> : 
-            <svg className="mr-2 h-4 w-4" aria-hidden="true" focusable="false" data-prefix="fab" data-icon="google" role="img" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 488 512"><path fill="currentColor" d="M488 261.8C488 403.3 381.5 512 244 512 110.3 512 0 398.8 0 256S110.3 0 244 0c77.2 0 142.3 28.5 195.4 73.8L391.1 126.8c-29.9-28.5-69.5-46.5-121.7-46.5-94.8 0-172.2 77.4-172.2 172.2s77.4 172.2 172.2 172.2c108.4 0 151.2-86.4 155.6-128.2H244v-94.2h244z"></path></svg>
-            }
-            Google
+          {error && <p className="text-sm text-destructive">{error}</p>}
+          <Button className="w-full" onClick={handleSaveProfile} disabled={isSaving}>
+            {isSaving ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> : null}
+            Save Profile
           </Button>
-          <Button variant="ghost" className="w-full" onClick={handleAnonymousSignIn} disabled={!!loading}>
-            {loading === 'anonymous' && <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />}
-            Sign In Anonymously
+        </CardContent>
+      </Card>
+    </div>
+  );
+};
+
+const FriendsTab: FC<{ user: User; userProfile: UserProfile }> = ({ user, userProfile }) => {
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<UserProfile[]>([]);
+  const [searchMessage, setSearchMessage] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+
+  const [incomingRequests, setIncomingRequests] = useState<FriendRequest[]>([]);
+  const [sentRequests, setSentRequests] = useState<FriendRequest[]>([]);
+  const [friends, setFriends] = useState<UserProfile[]>([]);
+
+  useEffect(() => {
+    const incomingQuery = query(collection(db, "friendRequests"), where("to.uid", "==", user.uid), where("status", "==", "pending"));
+    const unsubIncoming = onSnapshot(incomingQuery, (snapshot) => {
+      const requests = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as FriendRequest));
+      setIncomingRequests(requests);
+    });
+
+    const sentQuery = query(collection(db, "friendRequests"), where("from.uid", "==", user.uid), where("status", "==", "pending"));
+    const unsubSent = onSnapshot(sentQuery, (snapshot) => {
+      const requests = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as FriendRequest));
+      setSentRequests(requests);
+    });
+
+    return () => { unsubIncoming(); unsubSent(); };
+  }, [user.uid]);
+
+  useEffect(() => {
+    if (!userProfile?.friends || userProfile.friends.length === 0) {
+        setFriends([]);
+        return;
+    }
+
+    const unsubscribes = userProfile.friends.map(friendId => {
+        const friendDocRef = doc(db, "users", friendId);
+        return onSnapshot(friendDocRef, (docSnap) => {
+            if (docSnap.exists()) {
+                const friendData = docSnap.data() as UserProfile;
+                setFriends(prevFriends => {
+                    const otherFriends = prevFriends.filter(f => f.uid !== friendId);
+                    return [...otherFriends, friendData].sort((a, b) => (a.displayName || '').localeCompare(b.displayName || ''));
+                });
+            }
+        });
+    });
+    return () => unsubscribes.forEach(unsub => unsub());
+}, [userProfile?.friends]);
+
+
+  const handleSearch = async () => {
+    if (!searchQuery.includes('#') || searchQuery.trim().length < 5) {
+      setSearchMessage('Please enter a full name and tag (e.g., username#1234).');
+      setSearchResults([]);
+      return;
+    }
+    setIsLoading(true);
+    setSearchMessage('');
+    const [name, tag] = searchQuery.split('#');
+
+    try {
+      const q = query(collection(db, "users"), where("displayName", "==", name.trim()), where("tag", "==", `#${tag.trim()}`));
+      const querySnapshot = await getDocs(q);
+      const results: UserProfile[] = [];
+      querySnapshot.forEach((doc) => { if (doc.id !== user.uid) results.push(doc.data() as UserProfile) });
+      setSearchResults(results);
+      setSearchMessage(results.length === 0 ? 'No users found.' : '');
+    } catch {
+      setSearchMessage('Error searching for users.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+  
+  const handleSendRequest = async (targetUser: UserProfile) => {
+    if (userProfile.friends.includes(targetUser.uid)) {
+      toast.error(`You are already friends with ${targetUser.displayName}.`);
+      return;
+    }
+    
+    const existingRequest = [...incomingRequests, ...sentRequests].find(
+      req => (req.from.uid === targetUser.uid || req.to.uid === targetUser.uid)
+    );
+    if (existingRequest) {
+      toast.info("A friend request is already pending with this user.");
+      return;
+    }
+
+    try {
+      const requestId = [user.uid, targetUser.uid].sort().join('_');
+      const requestRef = doc(db, "friendRequests", requestId);
+      
+      await setDoc(requestRef, {
+        from: { uid: user.uid, displayName: userProfile.displayName, tag: userProfile.tag },
+        to: { uid: targetUser.uid, displayName: targetUser.displayName, tag: targetUser.tag },
+        status: 'pending',
+        createdAt: serverTimestamp()
+      });
+      toast.success(`Friend request sent to ${targetUser.displayName}${targetUser.tag}`);
+      setSearchResults([]);
+      setSearchQuery('');
+    } catch (error) {
+      console.error("Error sending friend request:", error);
+      toast.error("Failed to send friend request.");
+    }
+  };
+  
+  const handleAcceptRequest = async (request: FriendRequest) => {
+    const batch = writeBatch(db);
+
+    const currentUserRef = doc(db, "users", request.to.uid);
+    batch.update(currentUserRef, { friends: arrayUnion(request.from.uid) });
+
+    const senderUserRef = doc(db, "users", request.from.uid);
+    batch.update(senderUserRef, { friends: arrayUnion(request.to.uid) });
+
+    const requestRef = doc(db, "friendRequests", request.id);
+    batch.delete(requestRef);
+
+    try {
+      await batch.commit();
+      toast.success(`You are now friends with ${request.from.displayName}.`);
+    } catch (error) {
+      console.error("Error accepting friend request:", error);
+      toast.error("Failed to accept friend request.");
+    }
+  };
+  
+  const handleDeclineRequest = async (requestId: string) => {
+    try {
+      await deleteDoc(doc(db, "friendRequests", requestId));
+      toast.info("Friend request declined.");
+    } catch (error) {
+      console.error("Error declining friend request:", error);
+      toast.error("Failed to decline friend request.");
+    }
+  };
+  
+  const handleCancelRequest = async (requestId: string) => {
+    try {
+      await deleteDoc(doc(db, "friendRequests", requestId));
+      toast.info("Friend request cancelled.");
+    } catch (error) {
+      console.error("Error cancelling friend request:", error);
+      toast.error("Failed to cancel friend request.");
+    }
+  };
+
+  const isRequestPending = (targetUid: string) => sentRequests.some(req => req.to.uid === targetUid) || incomingRequests.some(req => req.from.uid === targetUid);
+  const isFriend = (targetUid: string) => friends.some(friend => friend.uid === targetUid);
+
+  return (
+    <div className="space-y-6 text-sm">
+      <div className="space-y-2">
+        <h4 className="font-semibold">Add Friend</h4>
+        <div className="flex gap-2">
+          <Input placeholder="username#1234" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleSearch()} />
+          <Button onClick={handleSearch} disabled={isLoading}>
+            {isLoading ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
           </Button>
         </div>
+      </div>
+      {searchMessage && <p className="text-muted-foreground text-center">{searchMessage}</p>}
+      {searchResults.length > 0 && (
+        <div className="space-y-2">
+          <h4 className="font-semibold">Search Results</h4>
+          <div className="border rounded-md">
+            {searchResults.map(foundUser => (
+              <div key={foundUser.uid} className="flex items-center justify-between p-3 border-b last:border-b-0">
+                <span>{foundUser.displayName}{foundUser.tag}</span>
+                <Button size="sm" variant="secondary" onClick={() => handleSendRequest(foundUser)} disabled={isRequestPending(foundUser.uid) || isFriend(foundUser.uid)}>
+                  {isFriend(foundUser.uid) ? 'Friends' : isRequestPending(foundUser.uid) ? <Hourglass className="h-4 w-4" /> : <UserPlus className="h-4 w-4" />}
+                </Button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      <div className="space-y-2">
+        <h4 className="font-semibold flex items-center gap-2"><MailQuestion className="h-4 w-4 text-primary"/> Incoming Requests</h4>
+        <div className="border rounded-md">
+          {incomingRequests.length > 0 ? (
+            incomingRequests.map(req => (
+              <div key={req.id} className="flex items-center justify-between p-3 border-b last:border-b-0">
+                <span>{req.from.displayName}{req.from.tag}</span>
+                <div className="flex gap-2">
+                  <Button size="sm" variant="secondary" onClick={() => handleAcceptRequest(req)}><Check className="h-4 w-4" /></Button>
+                  <Button size="sm" variant="destructive" onClick={() => handleDeclineRequest(req.id)}><X className="h-4 w-4" /></Button>
+                </div>
+              </div>
+            ))
+          ) : (
+            <p className="p-4 text-center text-muted-foreground">No incoming requests.</p>
+          )}
+        </div>
+      </div>
+      <div className="space-y-2">
+        <h4 className="font-semibold flex items-center gap-2"><Hourglass className="h-4 w-4 text-primary"/> Sent Requests</h4>
+        <div className="border rounded-md">
+          {sentRequests && sentRequests.length > 0 ? (
+            sentRequests.map(req => (
+              <div key={req.id} className="flex items-center justify-between p-3 border-b last:border-b-0">
+                  <span>{req.to.displayName}{req.to.tag}</span>
+                  <Button size="sm" variant="ghost" onClick={() => handleCancelRequest(req.id)}>Cancel</Button>
+              </div>
+            ))
+          ) : (
+            <p className="p-4 text-center text-muted-foreground">No sent requests.</p>
+          )}
+        </div>
+      </div>
+      <div className="space-y-2">
+        <h4 className="font-semibold flex items-center gap-2"><Users className="h-4 w-4 text-primary"/> Friends</h4>
+        <div className="border rounded-md">
+          {friends.length > 0 ? (
+            friends.map(friend => (
+              <div key={friend.uid} className="flex items-center justify-between p-3 border-b last:border-b-0">
+                <div className="flex items-center gap-2">
+                    <span className={cn("h-2 w-2 rounded-full", friend.status === 'online' ? 'bg-green-400' : 'bg-muted-foreground')} />
+                    <span>{friend.displayName}{friend.tag}</span>
+                </div>
+              </div>
+            ))
+          ) : (
+            <p className="p-4 text-center text-muted-foreground">Your friends list is empty.</p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const InvitationsTab: FC<{ user: User }> = ({ user }) => {
+    const [invites, setInvites] = useState<GameInvite[]>([]);
+    const router = useRouter();
+
+    useEffect(() => {
+        const q = query(collection(db, "invitations"), where("to.uid", "==", user.uid), where("status", "==", "pending"));
+        const unsub = onSnapshot(q, (snapshot) => {
+            const newInvites = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as GameInvite));
+            setInvites(newInvites);
+        });
+        return () => unsub();
+    }, [user.uid]);
+
+    const handleAccept = async (invite: GameInvite) => {
+        const roomRef = doc(db, "rooms", invite.roomId);
+        const userRef = doc(db, "users", user.uid);
+        try {
+            const [roomSnap, userSnap] = await Promise.all([getDoc(roomRef), getDoc(userRef)]);
+            if (!roomSnap.exists() || !userSnap.exists()) {
+                toast.error("Room or user not found.");
+                await deleteDoc(doc(db, "invitations", invite.id));
+                return;
+            }
+
+            const raw = roomSnap.data() as unknown as Partial<GameRoom> & Record<string, unknown>;
+            const rawPlayers = (raw as Record<string, unknown>).players as unknown;
+            const currentPlayers: Player[] = Array.isArray(rawPlayers)
+              ? (rawPlayers as Player[])
+              : rawPlayers && typeof rawPlayers === 'object'
+                ? (Object.values(rawPlayers as Record<string, Player>))
+                : [];
+            const roomData = { ...(raw as GameRoom), players: currentPlayers } as GameRoom;
+            const userData = userSnap.data() as UserProfile;
+            
+            if(roomData.players.length >= roomData.maxPlayers) {
+                toast.error("Room is full.");
+                await deleteDoc(doc(db, "invitations", invite.id));
+                return;
+            }
+             if (roomData.players.some(p => p.uid === user.uid)) {
+                router.push(`/room/${invite.roomId}`);
+                return;
+            }
+
+            const newPlayer = {
+                uid: user.uid,
+                displayName: userData.displayName,
+                tag: userData.tag,
+                isReady: false,
+                isMuted: true,
+                isSpeaking: false,
+                isLoaded: false,
+                status: 'connected' as const,
+            };
+
+            // New schema: only add playerIds on room doc, player state goes to subcollection
+            await updateDoc(roomRef, { [`playerIds.${user.uid}`]: true });
+            await setDoc(doc(roomRef, 'players', user.uid), newPlayer, { merge: true });
+
+            await deleteDoc(doc(db, "invitations", invite.id));
+            router.push(`/room/${invite.roomId}`);
+
+        } catch (error) {
+            console.error(error);
+            toast.error("Failed to join room.");
+        }
+    };
+
+    const handleDecline = async (inviteId: string) => {
+        await deleteDoc(doc(db, "invitations", inviteId));
+        toast.info("Invite declined.");
+    };
+
+    return (
+        <div className="space-y-4">
+            <h4 className="font-semibold flex items-center gap-2"><Bell className="h-4 w-4 text-primary"/> Game Invites</h4>
+            <div className="border rounded-md">
+                {invites.length > 0 ? (
+                    invites.map(invite => (
+                        <div key={invite.id} className="flex items-center justify-between p-3 border-b last:border-b-0">
+                            <div>
+                                <p><span className="font-semibold">{invite.from.displayName}</span> invited you to</p>
+                                <p className="text-sm text-muted-foreground">{invite.roomName}</p>
+                            </div>
+                            <div className="flex gap-2">
+                                <Button size="sm" variant="secondary" onClick={() => handleAccept(invite)}><Check className="h-4 w-4" /></Button>
+                                <Button size="sm" variant="destructive" onClick={() => handleDecline(invite.id)}><X className="h-4 w-4" /></Button>
+                            </div>
+                        </div>
+                    ))
+                ) : (
+                    <p className="p-4 text-center text-muted-foreground">No pending game invites.</p>
+                )}
+            </div>
+        </div>
+    );
+};
+
+
+const CreateRoom: FC<{ user: User | null, userProfile: UserProfile | null }> = ({ user, userProfile }) => {
+  const router = useRouter();
+  const [roomName, setRoomName] = useState('');
+  const [maxPlayers, setMaxPlayers] = useState(4);
+  const [isPrivate, setIsPrivate] = useState(false);
+  const [password, setPassword] = useState('');
+  const [isCreating, setIsCreating] = useState(false);
+  const [turnCount, setTurnCount] = useState<string>("30");
+  const [gobletsToWin, setGobletsToWin] = useState<string>("3");
+  const [turnLengthSec, setTurnLengthSec] = useState<string>("60");
+
+  const handleCreateRoom = async () => {
+    if (!user || !userProfile) {
+      toast.error("You must be logged in to create a room.");
+      return;
+    }
+    if (!roomName.trim()) {
+      toast.error("Room name cannot be empty.");
+      return;
+    }
+    if (isPrivate && !password) {
+      toast.error("Please enter a password for your private room.");
+      return;
+    }
+
+    setIsCreating(true);
+    try {
+      const newRoomData = {
+        name: roomName,
+        maxPlayers,
+        hasPassword: isPrivate,
+        password: isPrivate ? password : "",
+        host: {
+          uid: user.uid,
+          displayName: userProfile.displayName,
+        },
+        playerIds: { [user.uid]: true },
+        players: [{
+          uid: user.uid,
+          displayName: userProfile.displayName,
+          tag: userProfile.tag,
+          isReady: false,
+          isMuted: true,
+          isSpeaking: false,
+          isLoaded: false,
+          status: 'connected',
+        }],
+        settings: {
+          turnCount: turnCount === 'unlimited' ? null : parseInt(turnCount, 10),
+          gobletsToWin: gobletsToWin === 'unlimited' ? null : parseInt(gobletsToWin, 10),
+          turnLengthSec: turnLengthSec === 'unlimited' ? null : parseInt(turnLengthSec, 10),
+        },
+        createdAt: serverTimestamp(),
+        chatMessages: [],
+        status: 'waiting',
+      };
+      const roomRef = await addDoc(collection(db, "rooms"), newRoomData);
+      router.push(`/room/${roomRef.id}`);
+
+    } catch (error) {
+      console.error("Error creating room:", error);
+      toast.error("Failed to create room. Please try again.");
+    } finally {
+      setIsCreating(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader><CardTitle>Create Game</CardTitle></CardHeader>
+      <CardContent className="space-y-6">
+        <div className="space-y-2">
+          <Label htmlFor="room-name">Room Name</Label>
+          <Input id="room-name" placeholder="My Awesome Game" value={roomName} onChange={(e) => setRoomName(e.target.value)} />
+        </div>
+        <div className="space-y-2">
+          <div className="flex justify-between items-center">
+            <Label>Max Players</Label>
+            <span className="text-sm font-medium">{maxPlayers}</span>
+          </div>
+          <Slider defaultValue={[4]} min={2} max={8} step={1} onValueChange={(value) => setMaxPlayers(value[0])} />
+        </div>
+        <div className="space-y-2">
+            <Label htmlFor="turn-count">Turn Count</Label>
+            <select id="turn-count" value={turnCount} onChange={(e) => setTurnCount(e.target.value)} className={cn("flex h-10 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50")}>
+                <option value="10">10</option>
+                <option value="15">15</option>
+                <option value="20">20</option>
+                <option value="25">25</option>
+                <option value="30">30</option>
+                <option value="unlimited">Unlimited</option>
+            </select>
+        </div>
+        <div className="space-y-2">
+            <Label htmlFor="goblets-to-win">Goblets To Win</Label>
+            <select id="goblets-to-win" value={gobletsToWin} onChange={(e) => setGobletsToWin(e.target.value)} className={cn("flex h-10 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50")}>
+                <option value="1">1</option>
+                <option value="2">2</option>
+                <option value="3">3</option>
+                <option value="4">4</option>
+                <option value="5">5</option>
+                <option value="7">7</option>
+                <option value="10">10</option>
+                <option value="15">15</option>
+                <option value="20">20</option>
+                <option value="25">25</option>
+                <option value="30">30</option>
+                <option value="unlimited">Unlimited</option>
+            </select>
+        </div>
+        <div className="space-y-2">
+            <Label htmlFor="turn-length">Turn Length (seconds)</Label>
+            <select id="turn-length" value={turnLengthSec} onChange={(e) => setTurnLengthSec(e.target.value)} className={cn("flex h-10 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50")}>
+                <option value="10">10</option>
+                <option value="15">15</option>
+                <option value="20">20</option>
+                <option value="30">30</option>
+                <option value="60">60</option>
+                <option value="120">120</option>
+                <option value="300">300</option>
+                <option value="unlimited">Unlimited</option>
+            </select>
+        </div>
+        <div className="flex items-center justify-between">
+          <Label htmlFor="private-room" className="flex flex-col gap-1 cursor-pointer">
+            <span>Private Room</span>
+            <span className="font-normal text-xs text-muted-foreground">Only joinable with password.</span>
+          </Label>
+          <Switch id="private-room" checked={isPrivate} onCheckedChange={setIsPrivate} />
+        </div>
+        {isPrivate && (
+          <div className="space-y-2"><Label htmlFor="password">Password</Label><Input id="password" type="password" placeholder="••••••••" value={password} onChange={(e) => setPassword(e.target.value)} /></div>
+        )}
+        <Button className="w-full" onClick={handleCreateRoom} disabled={isCreating}>
+          {isCreating ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin"/> : <PlusCircle className="mr-2 h-4 w-4" />}
+          Create Room
+        </Button>
       </CardContent>
     </Card>
   );
 };
 
-// --- MAIN PAGE COMPONENT ---
-export default function Home() {
+/*
+    } else {
+      localStorage.removeItem('lastRoomId');
+    }
+  }).catch(() => {});
+  }, []);
+
+  const handleJoinClick = (room: GameRoom) => {
+    const players = Array.isArray(room.players) ? room.players : Object.values(((room as unknown) as Record<string, unknown>).players as Record<string, Player> || {});
+    if (players.some(p => p.uid === user?.uid)) {
+        router.push(`/room/${room.id}/lobby`);
+        return;
+    }
+    if (room.hasPassword) {
+      setSelectedRoom(room);
+    } else {
+      handleJoinRoom(room);
+    }
+  };
+  
+  const handleJoinRoom = async (room: GameRoom, enteredPassword?: string) => {
+    if (!user || !userProfile) return;
+    if (room.hasPassword && room.password !== enteredPassword) {
+      toast.error("Incorrect password.");
+      return;
+    }
+
+    setIsJoining(true);
+    const roomRef = doc(db, "rooms", room.id);
+    try {
+      await runTransaction(db, async (transaction) => {
+        const roomDoc = await transaction.get(roomRef);
+        if (!roomDoc.exists()) { throw new Error("Room does not exist!"); }
+
+        const raw = roomDoc.data() as unknown as Partial<GameRoom> & Record<string, unknown>;
+        const rawPlayers = (raw as Record<string, unknown>).players as unknown;
+        const currentPlayers: Player[] = Array.isArray(rawPlayers)
+          ? (rawPlayers as Player[])
+          : rawPlayers && typeof rawPlayers === 'object'
+            ? (Object.values(rawPlayers as Record<string, Player>))
+            : [];
+
+        const roomData = { ...(raw as GameRoom), players: currentPlayers } as GameRoom;
+        if (roomData.players.length >= roomData.maxPlayers) { throw new Error("Room is full!"); }
+        if (roomData.players.some(p => p.uid === user.uid)) { return; }
+
+        const newPlayer = {
+          uid: user.uid,
+          displayName: userProfile.displayName,
+          tag: userProfile.tag,
+          isReady: false,
+          isMuted: true,
+          isSpeaking: false,
+          isLoaded: false,
+          status: 'connected' as const,
+        };
+        
+        // Use atomic updates when field is an array; otherwise write normalized array
+        if (Array.isArray(rawPlayers)) {
+          transaction.update(roomRef, { 
+            players: arrayUnion(newPlayer),
+            [`playerIds.${user.uid}`]: true
+          });
+        } else {
+          transaction.update(roomRef, {
+            players: [...currentPlayers, newPlayer],
+            [`playerIds.${user.uid}`]: true
+          });
+        }
+      });
+      router.push(`/room/${room.id}/lobby`);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error("Error joining room: ", error);
+      toast.error(`Failed to join room: ${msg}`);
+    } finally {
+      setIsJoining(false);
+      setSelectedRoom(null);
+      setPassword('');
+    }
+  };
+
+  const filteredRooms = rooms.filter(room => (room.name || '').toLowerCase().includes(searchTerm.toLowerCase()));
+
+  return (
+    <Dialog open={!!selectedRoom} onOpenChange={(open) => !open && setSelectedRoom(null)}>
+      <Card className="flex flex-col h-full">
+        <CardHeader><CardTitle>Game Lobbies</CardTitle></CardHeader>
+        <CardContent className="flex-grow flex flex-col gap-4 min-h-0">
+          <div className="relative w-full sm:max-w-xs">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input placeholder="Search rooms..." className="pl-10" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
+          </div>
+          <div className="border rounded-lg h-full flex flex-col mt-4">
+            <div className="relative flex-grow overflow-y-auto [mask-image:linear-gradient(to_bottom,black_calc(100%-2rem),transparent)] custom-scrollbar">
+              <div className="p-1">
+                {loadingRooms && <div className="flex items-center justify-center p-8"><LoaderCircle className="h-6 w-6 animate-spin"/></div>}
+                {!loadingRooms && filteredRooms.length > 0 ? filteredRooms.map((room) => (
+                  <div key={room.id} className="flex flex-wrap items-center justify-between gap-y-2 gap-x-4 p-3 rounded-md hover:bg-accent">
+                    <div className="flex items-center gap-3">
+                      {room.hasPassword ? <Lock className="h-4 w-4 text-muted-foreground" /> : <div className="w-4" />}
+                      <div><p className="font-semibold">{room.name}</p><p className="text-xs text-muted-foreground">Hosted by {room.host.displayName}</p></div>
+                    </div>
+                    <div className="flex items-center gap-4">
+                      <div className="flex items-center gap-2 text-sm text-muted-foreground"><UsersRound className="h-4 w-4" /><span>{room.players.length}/{room.maxPlayers}</span></div>
+                      <Button size="sm" variant="secondary" onClick={() => handleJoinClick(room)} disabled={isJoining || room.players.length >= room.maxPlayers}>Join</Button>
+                    </div>
+                  </div>
+                )) : !loadingRooms && (
+                  <div className="flex items-center justify-center h-full text-center p-8 text-muted-foreground">No rooms found.</div>
+                )}
+              </div>
+            </div>
+          </div>
+
+
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Password Required</DialogTitle>
+          <DialogDescription>
+            The room <span className="font-medium">“{selectedRoom?.name}”</span> is private. Please enter the password to join.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="grid gap-4 py-4">
+            <Label htmlFor="password-input">Password</Label>
+            <Input id="password-input" type="password" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && selectedRoom && handleJoinRoom(selectedRoom, password)} />
+        </div>
+        <Button onClick={() => selectedRoom && handleJoinRoom(selectedRoom, password)} disabled={isJoining}>
+          {isJoining ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> : null}
+          Join Room
+        </Button>
+      </DialogContent>
+        }
+        setIsSaving(true);
+        try {
+            await updateDoc(doc(db, "users", user.uid), { displayName });
+            toast.success("Display name updated!");
+            onOpenChange(false);
+        } catch (error) {
+            toast.error("Failed to update display name.");
+            console.error(error);
+        } finally {
+            setIsSaving(false);
+        }
+    };
+    
+    return (
+        <Dialog open={open} onOpenChange={onOpenChange}>
+            <DialogContent>
+                <DialogHeader>
+                    <DialogTitle>Edit Profile</DialogTitle>
+                    <DialogDescription>Change your display name here. Your tag will remain the same.</DialogDescription>
+                </DialogHeader>
+                <div className="grid gap-4 py-4">
+                    <Label htmlFor="displayNameEdit">Display Name</Label>
+                    <div className="flex items-center gap-2">
+                         <Input id="displayNameEdit" value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+                         <span className="text-muted-foreground font-semibold">{profile.tag}</span>
+                    </div>
+                </div>
+                <Button onClick={handleSave} disabled={isSaving}>
+                    {isSaving && <LoaderCircle className="mr-2 h-4 w-4 animate-spin"/>}
+                    Save Changes
+                </Button>
+            </DialogContent>
+        </Dialog>
+    )
+}
+*/
+
+// Room list with join modal
+const RoomList: FC<{ user: User; userProfile: UserProfile }> = ({ user, userProfile }) => {
+  const router = useRouter();
+  const [rooms, setRooms] = useState<GameRoom[]>([]);
+  const [loadingRooms, setLoadingRooms] = useState(true);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [selectedRoom, setSelectedRoom] = useState<GameRoom | null>(null);
+  const [password, setPassword] = useState('');
+  const [isJoining, setIsJoining] = useState(false);
+
+  useEffect(() => {
+    const q = query(collection(db, 'rooms'));
+    const unsub = onSnapshot(q, (snapshot) => {
+      const list = snapshot.docs.map((d) => {
+        const raw = d.data() as unknown as Partial<GameRoom> & Record<string, unknown>;
+        const rawPlayers = (raw as Record<string, unknown>).players as unknown;
+        const currentPlayers: Player[] = Array.isArray(rawPlayers)
+          ? (rawPlayers as Player[])
+          : rawPlayers && typeof rawPlayers === 'object'
+            ? Object.values(rawPlayers as Record<string, Player>)
+            : [];
+        return { ...(raw as GameRoom), id: d.id, players: currentPlayers } as GameRoom;
+      });
+      setRooms(list);
+      setLoadingRooms(false);
+    }, () => setLoadingRooms(false));
+    return () => unsub();
+  }, []);
+
+  const handleJoinClick = (room: GameRoom) => {
+    const players = Array.isArray(room.players) ? room.players : Object.values(((room as unknown) as Record<string, unknown>).players as Record<string, Player> || {});
+    if (players.some((p) => p.uid === user.uid)) {
+      router.push(`/room/${room.id}/lobby`);
+      return;
+    }
+    if (room.hasPassword) {
+      setSelectedRoom(room);
+    } else {
+      handleJoinRoom(room);
+    }
+  };
+
+  const handleJoinRoom = async (room: GameRoom, enteredPassword?: string) => {
+    if (room.hasPassword && room.password !== enteredPassword) {
+      toast.error('Incorrect password.');
+      return;
+    }
+    setIsJoining(true);
+    const roomRef = doc(db, 'rooms', room.id);
+    try {
+      const newPlayer: Player = {
+        uid: user.uid,
+        displayName: userProfile.displayName,
+        tag: userProfile.tag,
+        isReady: false,
+        isMuted: true,
+        isSpeaking: false,
+        isLoaded: false,
+        status: 'connected',
+      };
+      await runTransaction(db, async (transaction) => {
+        const roomDoc = await transaction.get(roomRef);
+        if (!roomDoc.exists()) throw new Error('Room does not exist!');
+        const raw = roomDoc.data() as unknown as Partial<GameRoom> & Record<string, unknown>;
+        const ids = Object.keys((raw.playerIds as Record<string, boolean> | undefined) || {});
+        if (ids.length >= (raw.maxPlayers as number)) throw new Error('Room is full!');
+        if (ids.includes(user.uid)) return;
+        // Only update playerIds in the room doc inside the transaction
+        transaction.update(roomRef, { [`playerIds.${user.uid}`]: true });
+      });
+      // Create/merge player's subdoc outside the transaction
+      await setDoc(doc(roomRef, 'players', user.uid), newPlayer, { merge: true });
+      router.push(`/room/${room.id}/lobby`);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error('Error joining room: ', error);
+      toast.error(`Failed to join room: ${msg}`);
+    } finally {
+      setIsJoining(false);
+      setSelectedRoom(null);
+      setPassword('');
+    }
+  };
+
+  const filteredRooms = rooms.filter((room) => (room.name || '').toLowerCase().includes(searchTerm.toLowerCase()));
+
+  return (
+    <Dialog open={!!selectedRoom} onOpenChange={(open) => !open && setSelectedRoom(null)}>
+      <Card className="flex flex-col h-full">
+        <CardHeader><CardTitle>Game Lobbies</CardTitle></CardHeader>
+        <CardContent className="flex-grow flex flex-col gap-4 min-h-0">
+          <div className="relative w-full sm:max-w-xs">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input placeholder="Search rooms..." className="pl-10" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
+          </div>
+          <div className="border rounded-lg h-full flex flex-col mt-4">
+            <div className="relative flex-grow overflow-y-auto [mask-image:linear-gradient(to_bottom,black_calc(100%-2rem),transparent)] custom-scrollbar">
+              <div className="p-1">
+                {loadingRooms && <div className="flex items-center justify-center p-8"><LoaderCircle className="h-6 w-6 animate-spin"/></div>}
+                {!loadingRooms && filteredRooms.length > 0 ? filteredRooms.map((room) => (
+                  <div key={room.id} className="flex flex-wrap items-center justify-between gap-y-2 gap-x-4 p-3 rounded-md hover:bg-accent">
+                    <div className="flex items-center gap-3">
+                      {room.hasPassword ? <Lock className="h-4 w-4 text-muted-foreground" /> : <div className="w-4" />}
+                      <div><p className="font-semibold">{room.name}</p><p className="text-xs text-muted-foreground">Hosted by {room.host.displayName}</p></div>
+                    </div>
+                    <div className="flex items-center gap-4">
+                      {(() => { const count = Object.keys(room.playerIds || {}).length; return (
+                        <div className="flex items-center gap-2 text-sm text-muted-foreground"><UsersRound className="h-4 w-4" /><span>{count}/{room.maxPlayers}</span></div>
+                      ); })()}
+                      {(() => { const count = Object.keys(room.playerIds || {}).length; return (
+                        <Button size="sm" variant="secondary" onClick={() => handleJoinClick(room)} disabled={isJoining || count >= room.maxPlayers || (room.status && room.status !== 'waiting')}>
+                          {room.status && room.status !== 'waiting' ? 'In Game' : 'Join'}
+                        </Button>
+                      ); })()}
+                    </div>
+                  </div>
+                )) : !loadingRooms && (
+                  <div className="flex items-center justify-center h-full text-center p-8 text-muted-foreground">No rooms found.</div>
+                )}
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Password Required</DialogTitle>
+          <DialogDescription>
+            The room <span className="font-medium">{selectedRoom?.name}</span> is private. Please enter the password to join.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="grid gap-4 py-4">
+          <Label htmlFor="password-input">Password</Label>
+          <Input id="password-input" type="password" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && selectedRoom && handleJoinRoom(selectedRoom, password)} />
+        </div>
+        <Button onClick={() => selectedRoom && handleJoinRoom(selectedRoom, password)} disabled={isJoining}>
+          {isJoining ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> : null}
+          Join Room
+        </Button>
+      </DialogContent>
+    </Dialog>
+  );
+};
+
+// Edit Profile dialog
+const EditProfileDialog: FC<{ user: User; profile: UserProfile; open: boolean; onOpenChange: (v: boolean) => void }> = ({ user, profile, open, onOpenChange }) => {
+  const [displayName, setDisplayName] = useState(profile.displayName || '');
+  const [isSaving, setIsSaving] = useState(false);
+
+  useEffect(() => {
+    setDisplayName(profile.displayName || '');
+  }, [profile.displayName]);
+
+  const handleSave = async () => {
+    if (!displayName.trim() || displayName.length < 3) {
+      toast.error('Display name must be at least 3 characters long.');
+      return;
+    }
+    setIsSaving(true);
+    try {
+      await updateDoc(doc(db, 'users', user.uid), { displayName });
+      toast.success('Display name updated!');
+      onOpenChange(false);
+    } catch (error) {
+      console.error(error);
+      toast.error('Failed to update display name.');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Edit Profile</DialogTitle>
+          <DialogDescription>Change your display name here. Your tag will remain the same.</DialogDescription>
+        </DialogHeader>
+        <div className="grid gap-4 py-4">
+          <Label htmlFor="displayNameEdit">Display Name</Label>
+          <div className="flex items-center gap-2">
+            <Input id="displayNameEdit" value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+            <span className="text-muted-foreground font-semibold">{profile.tag}</span>
+          </div>
+        </div>
+        <Button onClick={handleSave} disabled={isSaving}>
+          {isSaving && <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />}
+          Save Changes
+        </Button>
+      </DialogContent>
+    </Dialog>
+  );
+};
+
+// --- MAIN LOBBY PAGE ---
+export default function LobbyPage() {
+  const [user, setUser] = useState<User | null>(null);
+  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
+  const [isEditProfileOpen, setEditProfileOpen] = useState(false);
   const router = useRouter();
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      if (currentUser) {
-        router.push('/lobby');
-      } else {
+    let unsubProfile: (() => void) | undefined;
+    let heartbeatInterval: ReturnType<typeof setInterval> | undefined;
+
+    const updateUserStatus = (uid: string, status: 'online' | 'offline') => {
+        const userDocRef = doc(db, "users", uid);
+        updateDoc(userDocRef, { status, lastSeen: serverTimestamp() }).catch(() => {});
+    };
+
+    const unsubscribeAuth = onAuthStateChanged(auth, async (currentUser) => {
+        // Clean up previous user's listeners and intervals
+        if (unsubProfile) unsubProfile();
+        if (heartbeatInterval) clearInterval(heartbeatInterval);
+
+        if (currentUser) {
+            setUser(currentUser);
+            
+            const userDocRef = doc(db, "users", currentUser.uid);
+            unsubProfile = onSnapshot(userDocRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    setUserProfile(docSnap.data() as UserProfile);
+                }
+            });
+
+            // Set initial status to online and start heartbeat
+            updateUserStatus(currentUser.uid, 'online');
+            heartbeatInterval = setInterval(() => {
+                if (auth.currentUser) {
+                    updateUserStatus(auth.currentUser.uid, 'online');
+                }
+            }, 10000); // Heartbeat every 10 seconds
+
+            const userDocSnap = await getDoc(userDocRef);
+            if (!userDocSnap.exists()) {
+                const tag = `#${String(Math.floor(1000 + Math.random() * 9000))}`;
+                const isNewEmailUser = !currentUser.isAnonymous && !currentUser.displayName;
+                const newProfile: UserProfile = {
+                    uid: currentUser.uid,
+                    email: currentUser.email,
+                    displayName: currentUser.isAnonymous ? `Guest` : currentUser.displayName,
+                    tag: currentUser.isAnonymous || currentUser.displayName ? tag : null,
+                    createdAt: serverTimestamp() as Timestamp,
+                    friends: [],
+                    status: 'online',
+                    lastSeen: serverTimestamp() as Timestamp,
+                    profileInitialized: !isNewEmailUser,
+                };
+                await setDoc(userDocRef, newProfile);
+                setUserProfile(newProfile);
+            } else {
+                setUserProfile(userDocSnap.data() as UserProfile)
+            }
+        } else { 
+            router.push('/'); 
+        }
         setLoading(false);
-      }
     });
-    return () => unsubscribe();
+
+    const handleBeforeUnload = () => {
+        if (auth.currentUser) {
+            updateUserStatus(auth.currentUser.uid, 'offline');
+        }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    return () => {
+        unsubscribeAuth();
+        if (unsubProfile) unsubProfile();
+        if (heartbeatInterval) clearInterval(heartbeatInterval);
+        window.removeEventListener('beforeunload', handleBeforeUnload);
+        if (auth.currentUser) {
+             updateUserStatus(auth.currentUser.uid, 'offline');
+        }
+    };
   }, [router]);
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center min-h-screen">
-        <LoaderCircle className="h-8 w-8 animate-spin text-primary" />
-      </div>
-    );
+
+  const handleProfileCreated = (profile: UserProfile) => setUserProfile(profile);
+  const handleSignOut = async () => { 
+    if (user) {
+        await updateDoc(doc(db, "users", user.uid), { status: 'offline', lastSeen: serverTimestamp() });
+    }
+    await signOut(auth);
+    router.push('/'); 
+  };
+
+  if (loading || !user || !userProfile) {
+    return <div className="flex items-center justify-center min-h-screen bg-background dark"><LoaderCircle className="h-8 w-8 animate-spin text-primary" /></div>;
+  }
+  
+  if (!user.isAnonymous && !userProfile.profileInitialized) {
+    return <div className="dark font-sans bg-background text-foreground min-h-screen flex flex-col"><ProfileSetup user={user} onProfileCreated={handleProfileCreated} /></div>;
   }
 
   return (
-    <div className="font-sans flex items-center justify-center min-h-screen p-4 bg-background dark">
-      <LoginPage />
+    <div className="dark font-sans bg-background text-foreground min-h-screen flex flex-col">
+      <div className="w-full max-w-screen-xl mx-auto p-4 sm:p-6 lg:p-8 flex flex-col flex-grow">
+        <header className="flex items-center justify-between pb-6 border-b mb-8">
+          <div className="flex items-center gap-2"><Gamepad2 className="h-7 w-7 text-primary" /><h1 className="text-2xl font-bold">CLUTCHPARTY</h1></div>
+          <div className="flex items-center gap-2">
+            {!user.isAnonymous && (
+                 <div className="flex items-center gap-1">
+                    <span className="hidden sm:inline text-sm">{userProfile.displayName}{userProfile.tag}</span>
+                    <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setEditProfileOpen(true)}>
+                        <Pencil className="h-4 w-4" />
+                    </Button>
+                 </div>
+            )}
+            <Button variant="ghost" size="sm" onClick={handleSignOut}><LogOut className="mr-2 h-4 w-4" />Sign Out</Button>
+          </div>
+        </header>
+        <main className="flex-grow flex flex-col lg:flex-row gap-8 min-h-0">
+          <aside className="w-full lg:w-1/3 lg:max-w-sm xl:max-w-md">
+            <CreateRoom user={user} userProfile={userProfile} />
+          </aside>
+          <section className="flex-grow flex flex-col min-w-0">
+            <Tabs defaultValue="public" className="flex flex-col flex-grow">
+              <TabsList>
+                <TabsTrigger value="public">Public Lobbies</TabsTrigger>
+                {!user.isAnonymous && <TabsTrigger value="friends">Friends</TabsTrigger>}
+                {!user.isAnonymous && <TabsTrigger value="invites">Invites</TabsTrigger>}
+              </TabsList>
+              <TabsContent value="public" className="flex-grow mt-4 min-h-0"><RoomList user={user} userProfile={userProfile} /></TabsContent>
+              {!user.isAnonymous && userProfile && (
+                <TabsContent value="friends" className="flex-grow mt-4 min-h-0 overflow-y-auto custom-scrollbar"><FriendsTab user={user} userProfile={userProfile} /></TabsContent>
+              )}
+               {!user.isAnonymous && (
+                <TabsContent value="invites" className="flex-grow mt-4 min-h-0 overflow-y-auto custom-scrollbar"><InvitationsTab user={user} /></TabsContent>
+              )}
+            </Tabs>
+          </section>
+        </main>
+      </div>
+      {!user.isAnonymous && <EditProfileDialog user={user} profile={userProfile} open={isEditProfileOpen} onOpenChange={setEditProfileOpen}/>}
     </div>
   );
 }

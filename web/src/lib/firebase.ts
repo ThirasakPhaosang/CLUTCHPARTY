@@ -4,7 +4,7 @@
 */
 import { initializeApp, getApps, getApp, FirebaseApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
-import { getFirestore } from 'firebase/firestore';
+import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager } from 'firebase/firestore';
 
 // Your web app's Firebase configuration
 const firebaseConfig = {
@@ -26,6 +26,12 @@ if (!getApps().length) {
 }
 
 const auth = getAuth(app);
-const db = getFirestore(app);
+// Firestore with stable dev networking and persistent cache across tabs
+const db = initializeFirestore(app, {
+  localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
+  experimentalAutoDetectLongPolling: true,
+  // experimentalForceLongPolling: true,
+  // useFetchStreams: false,
+});
 
 export { auth, db };

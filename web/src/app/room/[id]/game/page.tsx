@@ -8,14 +8,15 @@ import React, { useState, useEffect, forwardRef, ButtonHTMLAttributes, useRef } 
 import { useRouter, useParams } from 'next/navigation';
 import { auth, db } from '../../../../lib/firebase';
 import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
-import { doc, onSnapshot, updateDoc, Timestamp, runTransaction, collection, addDoc, query, where, deleteDoc, arrayUnion } from 'firebase/firestore';
-import { LoaderCircle, LogOut, MessageSquare, Mic, MicOff, Send, Trophy, Skull } from 'lucide-react';
+import { doc, onSnapshot, updateDoc, Timestamp, runTransaction, collection, addDoc, query, where, deleteDoc, arrayUnion, setDoc, deleteField, serverTimestamp, getDoc, getDocs, QueryDocumentSnapshot } from 'firebase/firestore';
+import { getMicStream, setStreamMuted } from '@/lib/mic';
+import { LoaderCircle, LogOut, MessageSquare, Mic, MicOff, Send, Trophy, Skull, Volume2, VolumeX } from 'lucide-react';
 import GameBoard from '@/components/game/GameBoard';
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
-// Fix: Import cva and VariantProps for styling variants.
 import { cva, type VariantProps } from 'class-variance-authority';
-import { Player, ChatMessage, GameRoom } from '@/lib/types';
+import { Player, ChatMessage, GameRoom, UserProfile } from '@/lib/types';
+type RoomDoc = Omit<GameRoom, 'players'> & { players: Record<string, Player> };
 
 
 // Global augmentation for older Safari AudioContext prefix
@@ -38,7 +39,6 @@ interface PlayerStats {
 
 
 // --- UTILS & COMPONENTS ---
-// Fix: Removed redundant 'cn' function definition as it is already imported from "@/lib/utils".
 
 const buttonVariants = cva("inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50", {
     variants: { variant: { default: "bg-primary text-primary-foreground hover:bg-primary/80", destructive: "bg-destructive text-destructive-foreground hover:bg-destructive/90", outline: "border border-input bg-background hover:bg-accent", secondary: "bg-secondary text-secondary-foreground hover:bg-secondary/80", ghost: "hover:bg-accent" }, size: { default: "h-9 px-4 py-2", sm: "h-8 rounded-md px-3 text-xs", icon: "h-9 w-9" } },
@@ -48,7 +48,6 @@ type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & VariantProps<typeof
 const Button = forwardRef<HTMLButtonElement, ButtonProps>(({ className, variant, size, ...props }, ref) => <button className={cn(buttonVariants({ variant, size, className }))} ref={ref} {...props} />);
 Button.displayName = "Button";
 
-// Fix: Corrected hex color value syntax.
 const PLAYER_COLORS = [0xff6347, 0x4682b4, 0x32cd32, 0xffd700, 0xda70d6, 0x00ced1, 0xfafafa, 0x808080];
 const getOrdinal = (n: number) => {
     const s = ["TH", "ST", "ND", "RD"];
@@ -65,12 +64,20 @@ export default function GamePage() {
     const roomId = params.id as string;
 
     const [user, setUser] = useState<FirebaseUser | null>(null);
-    const [room, setRoom] = useState<GameRoom | null>(null);
+    const [room, setRoom] = useState<RoomDoc | null>(null);
     const [isLoading, setIsLoading] = useState(true);
     const [isChatVisible, setIsChatVisible] = useState(false);
+    const [isVolumePanelVisible, setIsVolumePanelVisible] = useState(false);
     const [chatMessage, setChatMessage] = useState("");
     const [isMuted, setIsMuted] = useState(true);
+    const [micReady, setMicReady] = useState(false);
+    // Debounce Firestore writes for mic toggle to avoid lag and conflicts
+    const muteWriteTimerRef = useRef<number | null>(null);
+    const lastDesiredMuteRef = useRef<boolean>(true);
     const [isSpeaking, setIsSpeaking] = useState(false);
+    const micTrackRef = useRef<MediaStreamTrack | null>(null);
+    const localMicWantedRef = useRef<boolean>(true);
+    const lastLocalMicChangeRef = useRef<number>(0);
     
     // Mocked game state for UI
     const [playerStats, setPlayerStats] = useState<PlayerStats[]>([]);
@@ -78,21 +85,32 @@ export default function GamePage() {
     const [gameInfo, setGameInfo] = useState({ firstTo: 3, turn: 0, maxTurns: 30 });
 
     const chatEndRef = useRef<HTMLDivElement>(null);
-    const roomStateRef = useRef<GameRoom | null>(null);
+    const chatInputRef = useRef<HTMLInputElement>(null);
+    const roomStateRef = useRef<RoomDoc | null>(null);
     const audioStreamRef = useRef<MediaStream | null>(null);
+    const [userNames, setUserNames] = useState<Record<string, string>>({});
+    // Local-only controls for others' volume/mute
+    const [peerVolumes, setPeerVolumes] = useState<Record<string, number>>({});
+    const [peerMuted, setPeerMuted] = useState<Record<string, boolean>>({});
     // removed unused isSpeakingRef
     const peerConnectionsRef = useRef<{ [key: string]: RTCPeerConnection }>({});
     const [remoteStreams, setRemoteStreams] = useState<{ [key: string]: MediaStream }>({});
     const remoteAudioElementsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
-    const [masterVolume, setMasterVolume] = useState<number>(1);
-    const [audioUnlocked, setAudioUnlocked] = useState<boolean>(false);
     const [speakingPeers, setSpeakingPeers] = useState<Record<string, boolean>>({});
     const remoteAudioContextRef = useRef<AudioContext | null>(null);
-    const remoteAnalyzersRef = useRef<Map<string, { analyser: AnalyserNode, dataArray: Uint8Array<ArrayBuffer>, rafId: number }>>(new Map());
+    // FIX: Removed incorrect generic type from Uint8Array.
+    const remoteAnalyzersRef = useRef<Map<string, { analyser: AnalyserNode, source: MediaStreamAudioSourceNode, dataArray: Uint8Array<ArrayBuffer>, rafId: number }>>(new Map());
     const makingOfferRef = useRef<Record<string, boolean>>({});
     const isNegotiatingRef = useRef<Record<string, boolean>>({});
     const iceCandidateQueues = useRef<{ [key: string]: RTCIceCandidateInit[] }>({});
+    const outboundCandidateQueuesRef = useRef<Record<string, RTCIceCandidateInit[]>>({});
+    const outboundFlushTimersRef = useRef<Record<string, number>>({});
+    const sentCandidateKeysRef = useRef<Record<string, Set<string>>>({});
+    const receivedCandidateKeysRef = useRef<Record<string, Set<string>>>({});
+    const signalingBackoffUntilRef = useRef<number>(0);
     // removed unused lastDbUpdateRef
+    const didMarkLoadedRef = useRef(false);
+    const didSetPlayingRef = useRef(false);
 
 
     useEffect(() => {
@@ -112,26 +130,27 @@ export default function GamePage() {
             if (docSnap.exists()) {
                 type FirestoreRoomData = Partial<GameRoom> & Record<string, unknown> & { id: string };
                 const raw = { id: docSnap.id, ...docSnap.data() } as unknown as FirestoreRoomData;
-                const rawPlayers = (raw as Record<string, unknown>).players as unknown;
-                const normalizedPlayers: Player[] = Array.isArray(rawPlayers)
-                    ? (rawPlayers as Player[])
-                    : rawPlayers && typeof rawPlayers === 'object'
-                        ? (Object.values(rawPlayers as Record<string, Player>))
-                        : [];
-                const roomData: GameRoom = { ...(raw as GameRoom), players: normalizedPlayers };
-                if(roomData.status === 'waiting'){
-                    router.push(`/room/${roomId}`);
-                    toast.info("Game has ended, returning to lobby.");
-                    return;
-                }
-                setRoom(roomData);
-                roomStateRef.current = roomData;
+                
+                setRoom(prevRoom => {
+                    // This is the key fix: use prevRoom.players to avoid stale closure.
+                    const roomData: RoomDoc = { ...(raw as unknown as Omit<RoomDoc, 'players'>), players: (prevRoom?.players || {}) } as RoomDoc;
+                    
+                    if(roomData.status === 'waiting'){
+                        router.push(`/room/${roomId}`);
+                        toast.info("Game has ended, returning to lobby.");
+                        return prevRoom ?? roomData; // Must return a state
+                    }
+                    
+                    roomStateRef.current = roomData;
 
-                // Initialize or update mock stats when room data changes
-                setPlayerStats(roomData.players.map(p => ({
-                    uid: p.uid, score: 0, lives: 35, health: 30
-                })));
-                setEventLog([{ message: "Game Started!", timestamp: Date.now() }]);
+                    // This logic is preserved as requested. It will now run with correct player data.
+                    setPlayerStats(Object.values(roomData.players || {}).map(p => ({
+                        uid: p.uid, score: 0, lives: 35, health: 30
+                    })));
+                    setEventLog([{ message: "Game Started!", timestamp: Date.now() }]);
+
+                    return roomData;
+                });
 
             } else {
                 toast.error("Room not found.");
@@ -147,87 +166,217 @@ export default function GamePage() {
         });
         return () => unsubscribe();
     }, [roomId, router]);
+    // Listen players subcollection only when current user is a member
+    useEffect(() => {
+        if (!user?.uid) return;
+        const isMember = !!room?.playerIds && !!room.playerIds[user.uid];
+        const isHost = user?.uid === room?.host.uid;
+        if (!isMember && !isHost) return;
+        const roomRef = doc(db, "rooms", roomId);
+        const playersCol = collection(roomRef, 'players');
+        const unsub = onSnapshot(playersCol,
+          async (snap) => {
+            const map: Record<string, Player> = {};
+            snap.forEach(d => { try { map[d.id] = d.data() as Player; } catch {} });
+            setRoom(prev => prev ? { ...prev, players: map } : prev);
+            roomStateRef.current = roomStateRef.current ? { ...roomStateRef.current, players: map } : roomStateRef.current;
+            // Seed my subdoc if missing
+            try {
+              if ((isMember || isHost) && !map[user.uid]) {
+                await setDoc(doc(roomRef, 'players', user.uid), {
+                  uid: user.uid,
+                  isReady: false,
+                  isMuted: true,
+                  isSpeaking: false,
+                  isLoaded: false,
+                  status: 'connected'
+                } as Partial<Player>, { merge: true });
+              }
+            } catch {}
+          },
+          (err) => {
+            console.warn('Players listen error', err);
+          }
+        );
+        return () => unsub();
+    }, [roomId, user?.uid, Object.keys(room?.playerIds || {}).sort().join(',')]);
+
+    // Fetch real usernames for any missing displayName in players map
+    useEffect(() => {
+        const ids = Object.keys(room?.players || {});
+        const missing = ids.filter(uid => !(room?.players?.[uid]?.displayName) && !userNames[uid]);
+        if (missing.length === 0) return;
+        const chunks: string[][] = [];
+        for (let i = 0; i < missing.length; i += 10) chunks.push(missing.slice(i, i + 10));
+        (async () => {
+          try {
+            const out: Record<string, string> = {};
+            for (const c of chunks) {
+              const qUsers = query(collection(db, 'users'), where('uid', 'in', c));
+              const snap = await getDocs(qUsers);
+              snap.forEach((d: QueryDocumentSnapshot) => { const u = d.data() as UserProfile; if (u?.uid) out[u.uid] = u.displayName || u.email || u.uid; });
+            }
+            if (Object.keys(out).length) setUserNames(prev => ({ ...prev, ...out }));
+          } catch {}
+        })();
+    }, [Object.keys(room?.players || {}).sort().join(','), userNames]);
 useEffect(() => {
   if (room?.id) {
     try { localStorage.setItem('lastRoomId', room.id); } catch {}
   }
 }, [room?.id]);
     useEffect(() => {
-        const myPlayer = room?.players.find(p => p.uid === user?.uid);
-        if (myPlayer) {
-            setIsMuted(myPlayer.isMuted);
+        // Seed local mic UI state from authoritative player subdoc immediately on enter
+        if (!user?.uid || !roomId) return;
+        const roomRef = doc(db, 'rooms', roomId);
+        const meRef = doc(roomRef, 'players', user.uid);
+        (async () => {
+            try {
+                const snap = await getDoc(meRef);
+                if (snap.exists()) {
+                    const data = snap.data() as Player;
+                    if (typeof data.isMuted === 'boolean') {
+                        setIsMuted(data.isMuted);
+                        localMicWantedRef.current = !data.isMuted;
+                        try { micTrackRef.current && (micTrackRef.current.enabled = localMicWantedRef.current); } catch {}
+                    }
+                }
+            } catch {}
+        })();
+    }, [user?.uid, roomId]);
+
+    useEffect(() => {
+        if (user?.uid && room?.players) {
+            const myPlayer = room.players[user.uid as string];
+            if (myPlayer) {
+                // Reflect remote mute to UI only if not just changed locally
+                if (Date.now() - lastLocalMicChangeRef.current > 2000) {
+                    setIsMuted(myPlayer.isMuted);
+                }
+            }
         }
     }, [room, user]);
 
-    // Mark this player as loaded or reconnected
+    const attachMicWatchers = (track: MediaStreamTrack) => {
+        track.onended = () => { try { void reacquireMic(); } catch {} };
+        track.onmute = () => { setTimeout(() => { if (track && !track.muted) { try { void reacquireMic(); } catch {} } }, 500); };
+    };
+
+    const reacquireMic = async () => {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const newTrack = stream.getAudioTracks()[0];
+            micTrackRef.current = newTrack;
+            attachMicWatchers(newTrack);
+            const wanted = localMicWantedRef.current;
+            try { newTrack.enabled = wanted; } catch {}
+            // Replace on all peer connections
+            Object.values(peerConnectionsRef.current).forEach((pc: RTCPeerConnection) => {
+                const sender = pc.getSenders().find(s => s.track && s.track.kind === 'audio');
+                if (sender) { try { sender.replaceTrack(newTrack); } catch {} }
+                else { try { pc.addTrack(newTrack, stream); } catch {} }
+            });
+            audioStreamRef.current = stream;
+        } catch (e) {
+            console.warn('Reacquire mic failed', e);
+        }
+    };
+
+    // Ensure membership if joinable (direct link safety)
+    useEffect(() => {
+        if (!user || !room) return;
+        const isMember = !!room.playerIds?.[user.uid];
+        const joinable = room.status === 'waiting' || room.status === 'loading';
+        if (!isMember && joinable) {
+            updateDoc(doc(db, 'rooms', roomId), { [`playerIds.${user.uid}`]: true }).catch(() => {});
+        }
+    }, [user?.uid, room?.id, room?.status, Object.keys(room?.playerIds || {}).sort().join(','), roomId]);
+
+    // Mark this player as loaded or reconnected (debounced and idempotent)
     useEffect(() => {
         if (!user || !room || room.status === 'playing') return;
-
-        const currentPlayerInRoom = room.players.find(p => p.uid === user.uid);
-        if (currentPlayerInRoom && (!currentPlayerInRoom.isLoaded || currentPlayerInRoom.status === 'disconnected')) {
-            const roomRef = doc(db, "rooms", roomId);
-            runTransaction(db, async (transaction) => {
-                const sfDoc = await transaction.get(roomRef);
-                if (!sfDoc.exists()) { throw "Document does not exist!"; }
-                const currentRoom = sfDoc.data() as GameRoom;
-                const updatedPlayers = currentRoom.players.map(p => 
-                    p.uid === user.uid ? { ...p, isLoaded: true, status: 'connected' } : p
-                );
-                transaction.update(roomRef, { players: updatedPlayers });
-            }).catch(error => {
-                console.error("Transaction failed: ", error);
-            });
-        }
+        const me = room.players[user.uid];
+        if (!me) return; // wait until my player subdoc is visible
+        if (me.isLoaded && me.status !== 'disconnected') return; // nothing to do
+        if (didMarkLoadedRef.current) return;
+        didMarkLoadedRef.current = true;
+        const roomRef = doc(db, "rooms", roomId);
+        const pRef = doc(roomRef, 'players', user.uid);
+        setDoc(pRef, { isLoaded: true, status: 'connected' } as Partial<Player>, { merge: true }).catch(error => {
+            console.error('Set loaded failed', error);
+            didMarkLoadedRef.current = false; // allow retry on failure
+        });
     }, [user, room, roomId]);
     
-    // Host checks if all players are loaded
+    // Host checks if all players are loaded (based on playerIds, not empty map)
     useEffect(() => {
         if (!user || !room || room.host.uid !== user.uid || room.status !== 'loading') return;
-
-        const allPlayersLoaded = room.players.every(p => p.isLoaded);
-        if (allPlayersLoaded) {
+        const ids = Object.keys(room.playerIds || {});
+        // Only require loaded for currently connected players; ignore disconnected ghosts
+        const connectedIds = ids.filter(id => room.players?.[id]?.status !== 'disconnected');
+        const allPresentAndLoaded = connectedIds.length > 0 && connectedIds.every(id => !!room.players?.[id]?.isLoaded);
+        if (allPresentAndLoaded) {
+            if (process.env.NODE_ENV !== 'production') {
+                if (didSetPlayingRef.current) return;
+                didSetPlayingRef.current = true;
+            }
             const roomRef = doc(db, "rooms", roomId);
             updateDoc(roomRef, { status: 'playing' }).catch(console.error);
         }
     }, [user, room, roomId]);
     
-    useEffect(() => {
-        if (room) {
-            setIsLoading(room.status !== 'playing');
-        }
-    }, [room]);
+  useEffect(() => {
+    // Respect last mic preference on reload to avoid "no sound after refresh"
+    const savedWanted = typeof window !== 'undefined' && localStorage.getItem('micWanted') === 'true';
+    localMicWantedRef.current = savedWanted;
+    setIsMuted(!savedWanted);
+    if (audioStreamRef.current) {
+      try { audioStreamRef.current.getAudioTracks().forEach(t => t.enabled = savedWanted); } catch {}
+    }
+  }, []);
+
+  useEffect(() => {
+    if (room) {
+        setIsLoading(room.status !== 'playing');
+    }
+  }, [room]);
 
     useEffect(() => {
         if (!user?.uid || !roomId) return;
-        let animationFrameId: number; let localStream: MediaStream; let audioContext: AudioContext; let analyser: AnalyserNode; let source: MediaStreamAudioSourceNode; let dataArray: Uint8Array<ArrayBuffer>;
-        
-        // Remove Firestore writes for speaking status to avoid high-frequency contention
+        let animationFrameId: number | null = null;
+        let localStream: MediaStream | null = null;
+        let audioContext: AudioContext | null = null;
+        let analyser: AnalyserNode | null = null;
+        let source: MediaStreamAudioSourceNode | null = null;
+        let dataArray: Uint8Array<ArrayBuffer> | null = null;
 
         const setupMic = async () => {
             try {
-                localStream = await navigator.mediaDevices.getUserMedia({
-                    audio: {
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        autoGainControl: false,
-                        channelCount: 1,
-                        sampleRate: 48000
-                    }
-                });
+                localStream = await getMicStream();
                 audioStreamRef.current = localStream;
-                const currentPlayer = roomStateRef.current?.players.find(p => p.uid === user.uid);
-                const isInitiallyMuted = currentPlayer ? currentPlayer.isMuted : true;
-                setIsMuted(isInitiallyMuted);
-                localStream.getAudioTracks().forEach(track => { track.enabled = !isInitiallyMuted; });
-                
-                const AudioCtx = window.AudioContext || window.webkitAudioContext;
-                if (!AudioCtx) throw new Error("AudioContext not supported");
-                
+                setMicReady(true);
+                // Initialize local mic wanted from remote only if not just changed locally
+                const currentPlayer = roomStateRef.current?.players?.[user.uid];
+                if (typeof currentPlayer?.isMuted === 'boolean' && (Date.now() - lastLocalMicChangeRef.current > 2000)) {
+                    localMicWantedRef.current = !currentPlayer.isMuted;
+                    setIsMuted(currentPlayer.isMuted);
+                }
+                // Apply local mic state
+                micTrackRef.current = localStream.getAudioTracks()[0] || null;
+                if (micTrackRef.current) {
+                    try { micTrackRef.current.enabled = localMicWantedRef.current; } catch {}
+                    attachMicWatchers(micTrackRef.current);
+                }
+
+                const AudioCtx: typeof AudioContext | undefined = window.AudioContext || window.webkitAudioContext;
+                if (!AudioCtx) return;
+
                 audioContext = new AudioCtx({ latencyHint: 'interactive' } as AudioContextOptions);
                 analyser = audioContext.createAnalyser();
                 source = audioContext.createMediaStreamSource(localStream);
                 source.connect(analyser);
-                dataArray = new Uint8Array(new ArrayBuffer(analyser.frequencyBinCount)) as Uint8Array<ArrayBuffer>;
+                // Allocate with ArrayBuffer to satisfy stricter typings
+                dataArray = new Uint8Array(new ArrayBuffer(analyser.frequencyBinCount));
 
                 const onThreshold = 18;
                 const offThreshold = 12;
@@ -236,28 +385,54 @@ useEffect(() => {
                 const minHoldMs = 150;
 
                 const detectSpeaking = () => {
+                    if (!analyser || !dataArray) return;
                     analyser.getByteFrequencyData(dataArray);
                     const average = dataArray.reduce((s, v) => s + v, 0) / dataArray.length;
                     const now = performance.now();
                     if (!speaking && average > onThreshold && now - lastFlip > minHoldMs) {
                         speaking = true; lastFlip = now;
-                        setIsSpeaking(true); // Update local state
+                        setIsSpeaking(true);
                         setSpeakingPeers(prev => ({ ...prev, [user.uid]: true }));
                     } else if (speaking && average < offThreshold && now - lastFlip > minHoldMs) {
                         speaking = false; lastFlip = now;
                         setIsSpeaking(false);
                         setSpeakingPeers(prev => ({ ...prev, [user.uid]: false }));
                     }
-
-                    // no DB writes; purely local UI state
                     animationFrameId = requestAnimationFrame(detectSpeaking);
                 };
-                detectSpeaking();
-            } catch (err) { console.error("Mic access error:", err); }
+                animationFrameId = requestAnimationFrame(detectSpeaking);
+            } catch (err) {
+                console.error("Mic access error:", err);
+            }
         };
         setupMic();
-        return () => { cancelAnimationFrame(animationFrameId); localStream?.getTracks().forEach(track => track.stop()); audioContext?.close().catch(() => {}); };
-  }, [user?.uid, roomId]);
+        return () => {
+            if (animationFrameId) cancelAnimationFrame(animationFrameId);
+            try { source?.disconnect(); } catch {}
+            try { analyser?.disconnect(); } catch {}
+            try { audioContext?.close(); } catch {}
+            try { localStream?.getTracks().forEach(t => t.stop()); } catch {}
+            setMicReady(false);
+        };
+    }, [user?.uid, roomId]);
+
+    useEffect(() => {
+        const onDeviceChange = () => {
+            if (!micTrackRef.current || micTrackRef.current.readyState !== 'live') {
+                void reacquireMic();
+            }
+        };
+        try { navigator.mediaDevices.addEventListener('devicechange', onDeviceChange); } catch {}
+        return () => { try { navigator.mediaDevices.removeEventListener('devicechange', onDeviceChange); } catch {} };
+    }, []);
+
+    // Apply local volume/mute preferences to remote audio elements
+    useEffect(() => {
+        remoteAudioElementsRef.current.forEach((el, uid) => {
+            const vol = (peerMuted?.[uid]) ? 0 : (peerVolumes?.[uid] ?? 1);
+            try { el.volume = vol; } catch {}
+        });
+    }, [peerVolumes, peerMuted, remoteStreams]);
 
     // Analyze remote streams for speaking state with hysteresis and minimal flicker
     useEffect(() => {
@@ -276,7 +451,8 @@ useEffect(() => {
                 analyser.fftSize = 512;
                 analyser.smoothingTimeConstant = 0.85;
                 source.connect(analyser);
-                const dataArray = new Uint8Array(analyser.frequencyBinCount);
+                // Allocate with ArrayBuffer to satisfy stricter typings
+                const dataArray: Uint8Array<ArrayBuffer> = new Uint8Array(new ArrayBuffer(analyser.frequencyBinCount));
                 const onThreshold = 18, offThreshold = 12; let speaking = false; let lastFlip = 0; const minHoldMs = 150;
                 const tick = () => {
                     analyser.getByteFrequencyData(dataArray);
@@ -285,18 +461,21 @@ useEffect(() => {
                     if (!speaking && avg > onThreshold && now - lastFlip > minHoldMs) { speaking = true; lastFlip = now; setSpeakingPeers(prev => ({ ...prev, [uid]: true })); }
                     else if (speaking && avg < offThreshold && now - lastFlip > minHoldMs) { speaking = false; lastFlip = now; setSpeakingPeers(prev => ({ ...prev, [uid]: false })); }
                     const rafId = requestAnimationFrame(tick);
-                    remoteAnalyzersRef.current.set(uid, { analyser, dataArray, rafId });
+                    remoteAnalyzersRef.current.set(uid, { analyser, source, dataArray, rafId });
                 };
                 const rafId = requestAnimationFrame(tick);
-                remoteAnalyzersRef.current.set(uid, { analyser, dataArray, rafId });
+                remoteAnalyzersRef.current.set(uid, { analyser, source, dataArray, rafId });
             } catch {}
         };
 
         const current = new Set(Object.keys(remoteStreams));
-        for (const [uid, stream] of Object.entries(remoteStreams)) attach(uid, stream);
-        for (const [uid, entry] of Array.from(remoteAnalyzersRef.current.entries())) {
+        // FIX: Correctly iterate over remoteStreams object using Object.entries.
+        for (const [uid, stream] of Object.entries(remoteStreams)) attach(uid, stream as MediaStream);
+        for (const [uid, entry] of remoteAnalyzersRef.current.entries()) {
             if (!current.has(uid)) {
                 cancelAnimationFrame(entry.rafId);
+                try { entry.source.disconnect(); } catch {}
+                try { entry.analyser.disconnect(); } catch {}
                 remoteAnalyzersRef.current.delete(uid);
                 setSpeakingPeers(prev => { const n = { ...prev }; delete n[uid]; return n; });
             }
@@ -308,9 +487,9 @@ useEffect(() => {
     }, [remoteStreams]);
 
     useEffect(() => {
-        // Start signaling only after mic ready and the user is a member of the room
+        // Start signaling as soon as user is a member (do not wait for mic)
         const isMember = !!room?.playerIds && !!room.playerIds[user?.uid || ''];
-        if (!user || !roomId || !audioStreamRef.current || !room?.players || !isMember) return;
+        if (!user || !roomId || !room?.players || !isMember) return;
         const myId = user.uid;
         const roomRef = doc(db, "rooms", roomId);
         const signalingCollection = collection(roomRef, 'signaling');
@@ -324,13 +503,101 @@ useEffect(() => {
         const createPeerConnection = (peerId: string, initiator: boolean) => {
             if (localPeerConnections[peerId]) return localPeerConnections[peerId];
             const pc = new RTCPeerConnection(pcConfig);
+            try { pc.addTransceiver('audio', { direction: 'sendrecv' }); } catch {}
             localPeerConnections[peerId] = pc;
             audioStreamRef.current?.getTracks().forEach(track => pc.addTrack(track, audioStreamRef.current!));
             pc.ontrack = (event) => {
               const stream = event.streams?.[0] ?? new MediaStream([event.track]);
               setRemoteStreams(prev => ({ ...prev, [peerId]: stream }));
+              const ensurePlay = () => {
+                const el = remoteAudioElementsRef.current.get(peerId);
+                if (!el) return;
+                if (el.srcObject !== stream) el.srcObject = stream;
+                el.play?.().catch(() => {});
+              };
+              try { event.track.onunmute = ensurePlay; } catch {}
+              setTimeout(ensurePlay, 0);
             };
-            pc.onicecandidate = e => e.candidate && addDoc(signalingCollection, { from: myId, to: peerId, signal: { type: 'candidate', candidate: e.candidate.toJSON() } });
+            pc.onicecandidate = e => {
+              if (!e.candidate) {
+                const flushNow = async () => {
+                  const now = Date.now();
+                  const list = outboundCandidateQueuesRef.current[peerId] || [];
+                  if (list.length === 0) return;
+                  if (now < signalingBackoffUntilRef.current) return;
+                  try {
+                    await addDoc(signalingCollection, { from: myId, to: peerId, signal: { type: 'candidates', candidates: list } });
+                    outboundCandidateQueuesRef.current[peerId] = [];
+                  } catch (e) {
+                    const code = (e as { code?: string })?.code || '';
+                    if (code === 'resource-exhausted') signalingBackoffUntilRef.current = Date.now() + 30000;
+                  }
+                };
+                flushNow();
+                return;
+              }
+              const cand = e.candidate.toJSON();
+              const key = `${cand.candidate || ''}|${cand.sdpMid || ''}|${cand.sdpMLineIndex || ''}`;
+              const sentSet = sentCandidateKeysRef.current[peerId] || new Set<string>();
+              if (sentSet.has(key)) return;
+              sentSet.add(key);
+              sentCandidateKeysRef.current[peerId] = sentSet;
+              const q = outboundCandidateQueuesRef.current[peerId] || [];
+              const first = q.length === 0;
+              q.push(cand);
+              outboundCandidateQueuesRef.current[peerId] = q;
+              // Send the very first candidate immediately for faster connectivity
+              if (first) {
+                (async () => {
+                  const now = Date.now();
+                  if (now < signalingBackoffUntilRef.current) return;
+                  try {
+                    await addDoc(signalingCollection, { from: myId, to: peerId, signal: { type: 'candidates', candidates: q.splice(0, q.length) } });
+                    outboundCandidateQueuesRef.current[peerId] = [];
+                  } catch (e) {
+                    const code = (e as { code?: string })?.code || '';
+                    if (code === 'resource-exhausted') signalingBackoffUntilRef.current = Date.now() + 30000;
+                  }
+                })();
+              }
+              if (!outboundFlushTimersRef.current[peerId]) {
+                outboundFlushTimersRef.current[peerId] = (setTimeout(async function flush() {
+                  const now = Date.now();
+                  const list = outboundCandidateQueuesRef.current[peerId] || [];
+                  if (list.length === 0) { outboundFlushTimersRef.current[peerId] = 0 as unknown as number; return; }
+                  if (now < signalingBackoffUntilRef.current) {
+                    const delay = signalingBackoffUntilRef.current - now + 100;
+                    outboundFlushTimersRef.current[peerId] = (setTimeout(flush, delay) as unknown) as number; return;
+                  }
+                  try {
+                    await addDoc(signalingCollection, { from: myId, to: peerId, signal: { type: 'candidates', candidates: list } });
+                    outboundCandidateQueuesRef.current[peerId] = [];
+                    outboundFlushTimersRef.current[peerId] = 0 as unknown as number;
+                  } catch (e) {
+                    const code = (e as { code?: string })?.code || '';
+                    if (code === 'resource-exhausted') {
+                      signalingBackoffUntilRef.current = Date.now() + 30000;
+                      outboundFlushTimersRef.current[peerId] = (setTimeout(flush, 30000) as unknown) as number;
+                    } else {
+                      outboundFlushTimersRef.current[peerId] = (setTimeout(flush, 300) as unknown) as number;
+                    }
+                  }
+                }, 300) as unknown) as number;
+              }
+            };
+            pc.onicegatheringstatechange = () => {
+              if (pc.iceGatheringState === 'complete') {
+                const list = outboundCandidateQueuesRef.current[peerId] || [];
+                if (list.length > 0 && Date.now() >= signalingBackoffUntilRef.current) {
+                  addDoc(signalingCollection, { from: myId, to: peerId, signal: { type: 'candidates', candidates: list } })
+                    .then(() => { outboundCandidateQueuesRef.current[peerId] = []; })
+                    .catch((e: unknown) => {
+                      const code = (e as { code?: string })?.code || '';
+                      if (code === 'resource-exhausted') signalingBackoffUntilRef.current = Date.now() + 30000;
+                    });
+                }
+              }
+            };
             pc.oniceconnectionstatechange = async () => {
                 const st = pc.iceConnectionState;
                 if ((st === 'failed' || st === 'disconnected') && initiator) {
@@ -338,6 +605,8 @@ useEffect(() => {
                         if (pc.signalingState === 'stable') {
                             await pc.setLocalDescription(await pc.createOffer({ iceRestart: true }));
                             await addDoc(signalingCollection, { from: myId, to: peerId, signal: { type: 'offer', sdp: pc.localDescription?.sdp } });
+                        } else {
+                            try { pc.restartIce?.(); } catch {}
                         }
                     } catch {}
                 }
@@ -409,6 +678,23 @@ useEffect(() => {
                                if (!iceCandidateQueues.current[fromId]) iceCandidateQueues.current[fromId] = [];
                                iceCandidateQueues.current[fromId].push(signal.candidate);
                            }
+                        } else if (signal.candidates) {
+                           const arr = signal.candidates as RTCIceCandidateInit[];
+                           const recvSet = receivedCandidateKeysRef.current[fromId] || new Set<string>();
+                           const unique: RTCIceCandidateInit[] = [];
+                           for (const c of arr) {
+                             const k = `${c.candidate || ''}|${c.sdpMid || ''}|${c.sdpMLineIndex || ''}`;
+                             if (recvSet.has(k)) continue;
+                             recvSet.add(k);
+                             unique.push(c);
+                           }
+                           receivedCandidateKeysRef.current[fromId] = recvSet;
+                           if (pc.remoteDescription) {
+                             for (const c of unique) { try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch {} }
+                           } else {
+                             if (!iceCandidateQueues.current[fromId]) iceCandidateQueues.current[fromId] = [];
+                             iceCandidateQueues.current[fromId].push(...unique);
+                           }
                         }
                     } catch { }
                     await deleteDoc(change.doc.ref);
@@ -418,8 +704,19 @@ useEffect(() => {
           // Avoid crashing on permission/network blips
           console.warn('Signaling listen error', err);
         });
-        return () => { unsub(); Object.values(peerConnectionsRef.current).forEach(pc => pc.close()); peerConnectionsRef.current = {}; };
-    }, [roomId, user, Object.keys(room?.playerIds || {}).sort().join(','), audioStreamRef.current]);
+        return () => { unsub(); Object.values(peerConnectionsRef.current).forEach((pc: RTCPeerConnection) => pc.close()); peerConnectionsRef.current = {}; };
+    }, [roomId, user?.uid, Object.keys(room?.playerIds || {}).sort().join(',')]);
+
+    // When mic becomes available, attach tracks to existing PCs
+    useEffect(() => {
+      if (!audioStreamRef.current) return;
+      Object.entries(peerConnectionsRef.current).forEach(([peerId, pc]: [string, RTCPeerConnection]) => {
+        const haveSender = pc.getSenders().some(s => s.track && audioStreamRef.current!.getTracks().some(t => t.id === s.track!.id));
+        if (!haveSender) {
+          audioStreamRef.current!.getTracks().forEach(track => pc.addTrack(track, audioStreamRef.current!));
+        }
+      });
+    }, [micReady]);
 
     useEffect(() => {
         chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -433,20 +730,27 @@ useEffect(() => {
                 const roomDoc = await transaction.get(roomRef);
                 if (!roomDoc.exists()) return;
 
-                const roomData = roomDoc.data() as GameRoom;
+                const data = roomDoc.data() as unknown as { playerIds?: Record<string, boolean>; host: { uid: string; displayName: string | null } };
+                const newPlayerIds = { ...(data.playerIds || {}) } as Record<string, boolean>;
+                delete newPlayerIds[user.uid];
 
-                const playerToRemove = roomData.players.find(p => p.uid === user.uid);
-                if (playerToRemove) {
-                    const newPlayers = roomData.players.filter(p => p.uid !== user.uid);
-                    const newPlayerIds = { ...(roomData.playerIds || {}) } as Record<string, boolean>;
-                    delete newPlayerIds[user.uid];
-                    let newHost = roomData.host;
-
-                    if (user.uid === roomData.host.uid && newPlayers.length > 0) {
-                        newHost = { uid: newPlayers[0].uid, displayName: newPlayers[0].displayName };
+                // Determine new host from remaining playerIds
+                const remainingIds = Object.keys(newPlayerIds);
+                if (remainingIds.length === 0) {
+                    // Delete room and player subdoc
+                    transaction.delete(roomRef);
+                } else {
+                    let newHost = data.host;
+                    if (user.uid === data.host.uid) {
+                        const nextUid = remainingIds[0];
+                        // We cannot read player's displayName here reliably; keep uid only
+                        newHost = { uid: nextUid, displayName: null };
                     }
-                    transaction.update(roomRef, { players: newPlayers, playerIds: newPlayerIds, host: newHost });
+                    transaction.update(roomRef, { playerIds: newPlayerIds, host: newHost });
                 }
+                // Always delete player subdocument inside the same transaction
+                const pRef = doc(roomRef, 'players', user.uid);
+                transaction.delete(pRef);
             });
         } catch (error) { 
             console.error("Error leaving room: ", error); 
@@ -456,59 +760,69 @@ useEffect(() => {
 
     const handleToggleMute = () => {
         if (!user || !room) return;
-    
-        const newMutedState = !isMuted;
-        setIsMuted(newMutedState);
-    
+
+        const desiredMuted = !isMuted;
+        setIsMuted(desiredMuted);
+        lastDesiredMuteRef.current = desiredMuted;
+        lastLocalMicChangeRef.current = Date.now();
+        localMicWantedRef.current = !desiredMuted;
+        try { localStorage.setItem('micWanted', String(!desiredMuted)); } catch {}
+
+        // Apply locally immediately for responsive UX
         if (audioStreamRef.current) {
-            audioStreamRef.current.getAudioTracks().forEach(track => {
-                track.enabled = !newMutedState;
-            });
+            audioStreamRef.current.getAudioTracks().forEach(track => { track.enabled = !desiredMuted; });
         }
-    
-        const roomRef = doc(db, "rooms", roomId);
-        runTransaction(db, async (transaction) => {
-            const roomDoc = await transaction.get(roomRef);
-            if (!roomDoc.exists()) return;
-            const players = roomDoc.data().players as Player[];
-            const updatedPlayers = players.map(p => 
-                p.uid === user.uid ? { ...p, isMuted: newMutedState } : p
-            );
-            transaction.update(roomRef, { players: updatedPlayers });
-        }).catch(e => {
-            console.error("Mute toggle failed in Firestore:", e);
-            toast.error("Failed to sync mute status.");
-            setIsMuted(!newMutedState);
-             if (audioStreamRef.current) {
-                audioStreamRef.current.getAudioTracks().forEach(track => {
-                    track.enabled = newMutedState;
-                });
+
+        // Debounce Firestore write (coalesce rapid toggles)
+        if (muteWriteTimerRef.current) { clearTimeout(muteWriteTimerRef.current); }
+        muteWriteTimerRef.current = window.setTimeout(async () => {
+            const roomRef = doc(db, "rooms", roomId);
+            try {
+                await setDoc(doc(roomRef, 'players', user.uid), { isMuted: lastDesiredMuteRef.current } as Partial<Player>, { merge: true });
+            } catch (e2) {
+                console.error("Mute toggle failed in Firestore:", e2);
+                toast.error("Failed to sync mute status.");
+                const revertMuted = !lastDesiredMuteRef.current;
+                setIsMuted(revertMuted);
+                localMicWantedRef.current = !revertMuted;
+                if (audioStreamRef.current) {
+                    audioStreamRef.current.getAudioTracks().forEach(track => { track.enabled = !revertMuted; });
+                }
+            } finally {
+                muteWriteTimerRef.current = null;
             }
-        });
+        }, 200);
     };
     
     const handleSendMessage = async () => {
         if (!user || !room || !chatMessage.trim()) return;
-        const sender = room.players.find(p => p.uid === user.uid);
+        const sender = room.players[user.uid];
         if (!sender) return;
-        const newMessage: ChatMessage = { sender: sender.displayName, senderUID: user.uid, text: chatMessage, timestamp: Timestamp.now() };
-        await updateDoc(doc(db, "rooms", roomId), { chatMessages: arrayUnion(newMessage) });
-        setChatMessage("");
+        const display = sender.displayName ?? roomStateRef.current?.players?.[user.uid]?.displayName ?? user.displayName ?? 'Guest';
+        const newMessage: ChatMessage = { sender: display, senderUID: user.uid, text: chatMessage.trim(), timestamp: Timestamp.now() };
+        try {
+            await updateDoc(doc(db, "rooms", roomId), { chatMessages: arrayUnion(newMessage), updatedAt: serverTimestamp() });
+            setChatMessage("");
+            try { chatInputRef.current?.focus(); } catch {}
+        } catch (err) {
+            console.error('Failed to send message', err);
+            toast.error('Failed to send message');
+        }
     };
+
+    // Leave game when browser Back button is pressed, and replace history so forward won't re-enter
+    useEffect(() => {
+        const onPopState = () => { try { handleLeaveGamePermanently(); } catch {} ; try { setTimeout(() => { router.replace('/lobby'); try { window.history.pushState({}, '', '/lobby'); } catch {} }, 0); } catch {} };
+        window.addEventListener('popstate', onPopState);
+        return () => window.removeEventListener('popstate', onPopState);
+    }, [user?.uid, roomId]);
 
     useEffect(() => {
         const handleBeforeUnload = () => {
             if (!user || !roomId) return;
             const roomRef = doc(db, "rooms", roomId);
-            runTransaction(db, async (transaction) => {
-                const roomDoc = await transaction.get(roomRef);
-                if (!roomDoc.exists()) return;
-                const currentPlayers = roomDoc.data().players as Player[];
-                const updatedPlayers = currentPlayers.map(p =>
-                    p.uid === user.uid ? { ...p, status: 'disconnected' } : p
-                );
-                transaction.update(roomRef, { players: updatedPlayers });
-            }).catch(console.error);
+            const pRef = doc(roomRef, 'players', user.uid);
+            setDoc(pRef, { status: 'disconnected' } as Partial<Player>, { merge: true }).catch(() => {});
         };
         
         window.addEventListener('beforeunload', handleBeforeUnload);
@@ -518,10 +832,56 @@ useEffect(() => {
         };
     }, [user, roomId]);
 
-    // Keep all remote audio elements' volumes in sync with masterVolume
+    // Best-effort: unlock/resume audio on first user gesture across browsers (iOS Safari, Firefox mobile, etc.)
     useEffect(() => {
-        remoteAudioElementsRef.current.forEach(el => { try { el.volume = masterVolume; } catch {} });
-    }, [masterVolume]);
+        const resumeAll = (_e?: Event) => {
+            try { remoteAudioContextRef.current?.resume?.(); } catch {}
+            remoteAudioElementsRef.current.forEach((el) => {
+                try { el.muted = false; } catch {}
+                try { el.play(); } catch {}
+            });
+        };
+        const opts: AddEventListenerOptions = { once: true };
+        window.addEventListener('pointerdown', resumeAll, opts);
+        window.addEventListener('keydown', resumeAll, opts);
+        window.addEventListener('touchstart', resumeAll, opts);
+        window.addEventListener('pointermove', resumeAll, opts);
+        window.addEventListener('wheel', resumeAll, opts);
+        const onVis = () => { if (document.visibilityState === 'visible') resumeAll(); };
+        document.addEventListener('visibilitychange', onVis);
+        return () => {
+            window.removeEventListener('pointerdown', resumeAll);
+            window.removeEventListener('keydown', resumeAll);
+            window.removeEventListener('touchstart', resumeAll);
+            window.removeEventListener('pointermove', resumeAll);
+            window.removeEventListener('wheel', resumeAll);
+            document.removeEventListener('visibilitychange', onVis);
+        };
+    }, []);
+
+    // Cross-browser: recover from input device changes (e.g., Bluetooth headset switch on Safari/Chrome)
+    useEffect(() => {
+        const onDeviceChange = () => {
+            const t = micTrackRef.current;
+            if (!t || t.readyState !== 'live') {
+                navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+                    const track = stream.getAudioTracks()[0];
+                    micTrackRef.current = track;
+                    try { track.enabled = localMicWantedRef.current; } catch {}
+                    audioStreamRef.current = stream;
+                    Object.values(peerConnectionsRef.current).forEach((pc) => {
+                        const sender = pc.getSenders().find(s => s.track && s.track.kind === 'audio');
+                        if (sender) { try { sender.replaceTrack(track); } catch {} }
+                        else { try { pc.addTrack(track, stream); } catch {} }
+                    });
+                }).catch(() => {});
+            }
+        };
+        try { navigator.mediaDevices.addEventListener('devicechange', onDeviceChange); } catch {}
+        return () => { try { navigator.mediaDevices.removeEventListener('devicechange', onDeviceChange); } catch {} };
+    }, []);
+
+    // Removed master volume control; rely on system/browser volume
 
     if (!room || isLoading) {
         return (
@@ -532,9 +892,9 @@ useEffect(() => {
             </div>
         );
     }
-    
-    // Sort players for leaderboard (mock logic, e.g., by score)
-    const sortedPlayers = [...room.players].sort((a, b) => {
+
+    // Add explicit Player types to sort callback parameters to fix properties not existing on 'unknown'.
+    const sortedPlayers = (Object.values(room.players || {}) as Player[]).sort((a: Player, b: Player) => {
         const statsA = playerStats.find(s => s.uid === a.uid);
         const statsB = playerStats.find(s => s.uid === b.uid);
         if (!statsA || !statsB) return 0;
@@ -543,7 +903,7 @@ useEffect(() => {
 
     return (
         <div className="w-screen h-screen bg-zinc-900 relative font-sans text-white overflow-hidden">
-            <GameBoard room={room} speakingPeers={speakingPeers} />
+            <GameBoard room={room} speakingPeers={speakingPeers} userNames={userNames} />
              {Object.entries(remoteStreams).map(([uid, stream]) => (
                   <audio
                     key={uid}
@@ -553,12 +913,11 @@ useEffect(() => {
                     // ensure not muted and try to play on canplay for autoplay policies
                     muted={false}
                     ref={audioEl => {
-                      if (!audioEl) return;
-                      remoteAudioElementsRef.current.set(uid, audioEl);
-                      if (audioEl.srcObject !== stream) {
-                        audioEl.srcObject = stream;
-                      }
-                      audioEl.volume = masterVolume;
+                     if (!audioEl) return;
+                     remoteAudioElementsRef.current.set(uid, audioEl);
+                     if (audioEl.srcObject !== stream) {
+                       audioEl.srcObject = stream;
+                     }
                       audioEl.play?.().catch(() => {});
                     }}
                      onCanPlay={e => { try { (e.currentTarget as HTMLAudioElement).play(); } catch {} }}
@@ -566,7 +925,7 @@ useEffect(() => {
              ))}
 
             {/* Leaderboard UI */}
-            <div className="absolute top-4 left-4 w-full max-w-xs space-y-1">
+            <div className="absolute top-4 left-4 w-full max-w-xs space-y-1 z-10">
                 {sortedPlayers.map((player, index) => {
                     const stats = playerStats.find(s => s.uid === player.uid);
                     if (!stats) return null;
@@ -580,7 +939,7 @@ useEffect(() => {
                             <div style={{ backgroundColor: color }} className="w-1.5 h-10 rounded-full"></div>
                             <div className="flex-grow">
                                 <div className="flex justify-between items-center">
-                                    <span className="font-bold text-white truncate pr-2">{player.displayName}</span>
+                                    <span className="font-bold text-white truncate pr-2">{player.displayName || userNames[player.uid] || '---'}</span>
                                     <div className="flex items-center gap-2 text-xs text-zinc-300">
                                         <span className="flex items-center gap-1"><Trophy className="h-4 w-4 text-yellow-400" /> {stats.score}</span>
                                         <span className="flex items-center gap-1"><Skull className="h-4 w-4 text-zinc-400" /> {stats.lives}</span>
@@ -598,7 +957,7 @@ useEffect(() => {
             </div>
             
             {/* Game Info & Controls */}
-            <div className="absolute top-2 right-2 md:top-4 md:right-4 flex items-start gap-2 md:gap-4">
+            <div className="absolute top-2 right-2 md:top-4 md:right-4 flex items-start gap-2 md:gap-4 z-10">
                 <div className="bg-zinc-900/70 backdrop-blur-md p-3 rounded-lg text-white text-sm w-44 md:w-52 space-y-2 border border-zinc-700/60 shadow-lg">
                     <div className="flex justify-between items-center">
                         <span>First to</span>
@@ -615,53 +974,40 @@ useEffect(() => {
                     </div>
                 </div>
                  <div className="flex flex-col gap-2 p-2 bg-zinc-900/70 backdrop-blur-md rounded-lg border border-zinc-700/60 shadow-lg items-center">
-                    {!audioUnlocked && (
-                      <Button variant="secondary" size="sm" onClick={() => {
-                        try { remoteAudioContextRef.current?.resume(); } catch {}
-                        try {
-                          remoteAudioElementsRef.current.forEach(a => { a.play?.().catch(() => {}); });
-                          setAudioUnlocked(true);
-                        } catch { setAudioUnlocked(false); }
-                      }}>
-                        Enable Audio
+                     {/* Enable Audio button removed per request; autoplay handled best-effort */}
+                      <Button variant="ghost" onClick={() => setIsChatVisible(v => !v)} aria-label="Toggle Chat" title={isChatVisible ? "Hide Chat" : "Show Chat"} size="icon" className="h-10 w-10 hover:bg-zinc-700 text-white">
+                         <MessageSquare className="h-5 w-5" />
                       </Button>
-                    )}
-                    {audioUnlocked && (
-                      <span className="text-[10px] uppercase tracking-widest text-zinc-400">Audio Enabled</span>
-                    )}
-                     <Button variant="ghost" onClick={() => setIsChatVisible(v => !v)} aria-label="Toggle Chat" title={isChatVisible ? "Hide Chat" : "Show Chat"} size="icon" className="h-10 w-10 hover:bg-zinc-700 text-white">
-                        <MessageSquare className="h-5 w-5" />
+                      <Button variant="ghost" onClick={() => setIsVolumePanelVisible(v => !v)} aria-label="Volume Panel" title={isVolumePanelVisible ? "Hide Volume" : "Show Volume"} size="icon" className="h-10 w-10 hover:bg-zinc-700 text-white">
+                         <Volume2 className="h-5 w-5" />
+                      </Button>
+                      <Button
+                         variant="ghost"
+                         onClick={handleToggleMute}
+                         aria-label="Toggle Mic"
+                         className={cn( "h-10 w-10 hover:bg-zinc-700 text-white rounded-full border border-zinc-600", !isMuted && "ring-2 ring-green-500 bg-green-500/20", (isSpeaking && !isMuted) && "animate-pulse")}
+                         title={isMuted ? "Unmute" : "Mute"}
+                     >
+                         {isMuted ? <MicOff className="h-5 w-5 text-red-400" /> : <Mic className="h-5 w-5 text-white" />}
                      </Button>
-                    <Button
-                        variant="ghost"
-                        onClick={handleToggleMute}
-                        aria-label="Toggle Mic"
-                        className={cn( "h-10 w-10 hover:bg-zinc-700 text-white rounded-full border border-zinc-600", !isMuted && "ring-2 ring-green-500 bg-green-500/20", (isSpeaking && !isMuted) && "animate-pulse")}
-                        title={isMuted ? "Unmute" : "Mute"}
-                    >
-                        {isMuted ? <MicOff className="h-5 w-5 text-red-400" /> : <Mic className="h-5 w-5 text-white" />}
-                    </Button>
-                     <Button variant="ghost" onClick={handleLeaveGamePermanently} aria-label="Leave" title="Leave Game" size="icon" className="h-10 w-10 text-red-400 hover:bg-red-500/20 hover:text-red-400">
-                         <LogOut className="h-5 w-5" />
-                     </Button>
-                     <div className="flex items-center gap-2 w-32">
-                       <span className="text-xs text-zinc-400">Vol</span>
-                       <input type="range" min={0} max={100} defaultValue={100} onChange={(e) => setMasterVolume(Number(e.target.value)/100)} className="w-full" />
-                     </div>
-                 </div>
+                      <Button variant="ghost" onClick={handleLeaveGamePermanently} aria-label="Leave" title="Leave Game" size="icon" className="h-10 w-10 text-red-400 hover:bg-red-500/20 hover:text-red-400">
+                          <LogOut className="h-5 w-5" />
+                      </Button>
+                      {/* Removed mic volume adjuster per request */}
+                  </div>
             </div>
 
             {/* Event Log */}
-            <div className="absolute bottom-4 left-4 bg-black/60 backdrop-blur-sm p-2 rounded-lg text-sm text-white font-mono shadow-lg border border-zinc-700/50">
+            <div className="absolute bottom-4 left-4 bg-black/60 backdrop-blur-sm p-2 rounded-lg text-sm text-white font-mono shadow-lg border border-zinc-700/50 z-10">
                 {eventLog.length > 0 && <span>{eventLog[eventLog.length - 1].message}</span>}
             </div>
             
             {/* Chat Panel */}
             {isChatVisible && (
-                <div className="absolute bottom-4 left-4 w-full max-w-sm bg-black/60 backdrop-blur-md rounded-lg p-3 flex flex-col h-[40vh] shadow-2xl border border-zinc-700/50">
+                <div className="absolute bottom-4 left-4 w-full max-w-sm bg-black/60 backdrop-blur-md rounded-lg p-3 flex flex-col h-[40vh] shadow-2xl border border-zinc-700/50 z-20">
                     <div className="flex-1 overflow-y-auto mb-2 space-y-2 pr-2 text-sm custom-scrollbar">
                         {room.chatMessages.map((msg, i) => (
-                           <div key={i} className={cn("flex flex-col w-full text-white", msg.senderUID === user?.uid ? "items-end" : "items-start")}>
+                           <div key={`${msg.senderUID}-${msg.timestamp?.seconds ?? i}-${i}`} className={cn("flex flex-col w-full text-white", msg.senderUID === user?.uid ? "items-end" : "items-start")}>
                                <div className={cn("max-w-[90%] rounded-lg px-3 py-2", msg.senderUID === user?.uid ? "bg-primary text-primary-foreground" : "bg-zinc-700")}>
                                    {msg.senderUID !== user?.uid && <p className="text-xs font-bold text-blue-400 mb-1">{msg.sender}</p>}
                                    <p className="text-sm break-words">{msg.text}</p>
@@ -675,6 +1021,7 @@ useEffect(() => {
                     </div>
                     <div className="flex gap-2 flex-shrink-0">
                         <input
+                            ref={chatInputRef}
                             type="text"
                             placeholder="Type a message..." 
                             value={chatMessage} 
@@ -688,15 +1035,22 @@ useEffect(() => {
                     </div>
                 </div>
             )}
+
+            {/* Volume Panel */}
+            {isVolumePanelVisible && (
+                <div className="absolute bottom-4 left-4 w-full max-w-sm bg-black/60 backdrop-blur-md rounded-lg p-3 flex flex-col max-h-[40vh] overflow-y-auto shadow-2xl border border-zinc-700/50 z-20 custom-scrollbar">
+                   <div className="font-semibold mb-2">Volume Controls</div>
+                   {Object.values(room.players || {}).filter(p => p.uid !== user?.uid).map(p => (
+                       <div key={p.uid} className="flex items-center gap-2 py-1">
+                          <span className="flex-1 truncate">{p.displayName || p.uid}</span>
+                          <button onClick={() => setPeerMuted(prev => ({...prev, [p.uid]: !prev?.[p.uid]}))} className="h-8 w-8 rounded-md hover:bg-zinc-700 flex items-center justify-center">
+                              {(peerMuted?.[p.uid]) ? <VolumeX className="h-4 w-4 text-red-400"/> : <Volume2 className="h-4 w-4"/>}
+                          </button>
+                          <input type="range" min={0} max={1} step={0.05} className="w-32" value={(peerVolumes?.[p.uid]) ?? 1} onChange={(e) => setPeerVolumes(prev => ({...prev, [p.uid]: parseFloat((e.target as HTMLInputElement).value)}))} />
+                       </div>
+                   ))}
+                </div>
+            )}
         </div>
     );
 }
-
-
-
-
-
-
-
-
-

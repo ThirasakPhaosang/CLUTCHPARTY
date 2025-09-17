@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @license
  * SPDX-License-Identifier: Apache-2.0
 */
@@ -8,7 +8,7 @@ import React, { useState, useEffect, FC, forwardRef, HTMLAttributes, InputHTMLAt
 import { useRouter } from 'next/navigation';
 import { auth, db } from '../../lib/firebase';
 import { onAuthStateChanged, signOut, User } from 'firebase/auth';
-import { doc, getDoc, updateDoc, collection, query, where, getDocs, setDoc, serverTimestamp, arrayUnion, onSnapshot, addDoc, Timestamp, writeBatch, deleteDoc, runTransaction } from "firebase/firestore";
+import { doc, getDoc, updateDoc, collection, query, where, getDocs, setDoc, serverTimestamp, onSnapshot, addDoc, Timestamp, writeBatch, deleteDoc, runTransaction, arrayUnion } from "firebase/firestore";
 import { toast } from "sonner";
 import { UserProfile, FriendRequest, GameRoom, GameInvite, Player } from "@/lib/types";
 
@@ -490,17 +490,9 @@ const InvitationsTab: FC<{ user: User }> = ({ user }) => {
                 status: 'connected' as const,
             };
 
-            if (Array.isArray(rawPlayers)) {
-                await updateDoc(roomRef, { 
-                    players: arrayUnion(newPlayer),
-                    [`playerIds.${user.uid}`]: true,
-                });
-            } else {
-                await updateDoc(roomRef, { 
-                    players: [...currentPlayers, newPlayer],
-                    [`playerIds.${user.uid}`]: true,
-                });
-            }
+            // New schema: only add playerIds on room doc, player state goes to subcollection
+            await updateDoc(roomRef, { [`playerIds.${user.uid}`]: true });
+            await setDoc(doc(roomRef, 'players', user.uid), newPlayer, { merge: true });
 
             await deleteDoc(doc(db, "invitations", invite.id));
             router.push(`/room/${invite.roomId}`);
@@ -549,12 +541,17 @@ const CreateRoom: FC<{ user: User | null, userProfile: UserProfile | null }> = (
   const [isPrivate, setIsPrivate] = useState(false);
   const [password, setPassword] = useState('');
   const [isCreating, setIsCreating] = useState(false);
+  const [turnCount, setTurnCount] = useState<string>("30");
+  const [gobletsToWin, setGobletsToWin] = useState<string>("3");
+  const [turnLengthSec, setTurnLengthSec] = useState<string>("60");
 
   const handleCreateRoom = async () => {
     if (!user || !userProfile) {
       toast.error("You must be logged in to create a room.");
       return;
     }
+    // Prevent rapid double-clicks
+    if (isCreating) return;
     if (!roomName.trim()) {
       toast.error("Room name cannot be empty.");
       return;
@@ -566,6 +563,18 @@ const CreateRoom: FC<{ user: User | null, userProfile: UserProfile | null }> = (
 
     setIsCreating(true);
     try {
+      // Ensure user doesn't already have an active room
+      const existingSnap = await getDocs(query(
+        collection(db, "rooms"),
+        where("host.uid", "==", user.uid),
+        where("status", "==", "waiting")
+      ));
+      if (!existingSnap.empty) {
+        const existing = existingSnap.docs[0];
+        toast.info("You already have a room. Redirecting...");
+        router.push(`/room/${existing.id}/lobby`);
+        return;
+      }
       const newRoomData = {
         name: roomName,
         maxPlayers,
@@ -586,6 +595,11 @@ const CreateRoom: FC<{ user: User | null, userProfile: UserProfile | null }> = (
           isLoaded: false,
           status: 'connected',
         }],
+        settings: {
+          turnCount: turnCount === 'unlimited' ? null : parseInt(turnCount, 10),
+          gobletsToWin: gobletsToWin === 'unlimited' ? null : parseInt(gobletsToWin, 10),
+          turnLengthSec: turnLengthSec === 'unlimited' ? null : parseInt(turnLengthSec, 10),
+        },
         createdAt: serverTimestamp(),
         chatMessages: [],
         status: 'waiting',
@@ -615,6 +629,47 @@ const CreateRoom: FC<{ user: User | null, userProfile: UserProfile | null }> = (
             <span className="text-sm font-medium">{maxPlayers}</span>
           </div>
           <Slider defaultValue={[4]} min={2} max={8} step={1} onValueChange={(value) => setMaxPlayers(value[0])} />
+        </div>
+        <div className="space-y-2">
+            <Label htmlFor="turn-count">Turn Count</Label>
+            <select id="turn-count" value={turnCount} onChange={(e) => setTurnCount(e.target.value)} className={cn("flex h-10 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50")}>
+                <option value="10">10</option>
+                <option value="15">15</option>
+                <option value="20">20</option>
+                <option value="25">25</option>
+                <option value="30">30</option>
+                <option value="unlimited">Unlimited</option>
+            </select>
+        </div>
+        <div className="space-y-2">
+            <Label htmlFor="goblets-to-win">Goblets To Win</Label>
+            <select id="goblets-to-win" value={gobletsToWin} onChange={(e) => setGobletsToWin(e.target.value)} className={cn("flex h-10 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50")}>
+                <option value="1">1</option>
+                <option value="2">2</option>
+                <option value="3">3</option>
+                <option value="4">4</option>
+                <option value="5">5</option>
+                <option value="7">7</option>
+                <option value="10">10</option>
+                <option value="15">15</option>
+                <option value="20">20</option>
+                <option value="25">25</option>
+                <option value="30">30</option>
+                <option value="unlimited">Unlimited</option>
+            </select>
+        </div>
+        <div className="space-y-2">
+            <Label htmlFor="turn-length">Turn Length (seconds)</Label>
+            <select id="turn-length" value={turnLengthSec} onChange={(e) => setTurnLengthSec(e.target.value)} className={cn("flex h-10 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50")}>
+                <option value="10">10</option>
+                <option value="15">15</option>
+                <option value="20">20</option>
+                <option value="30">30</option>
+                <option value="60">60</option>
+                <option value="120">120</option>
+                <option value="300">300</option>
+                <option value="unlimited">Unlimited</option>
+            </select>
         </div>
         <div className="flex items-center justify-between">
           <Label htmlFor="private-room" className="flex flex-col gap-1 cursor-pointer">
@@ -855,41 +910,28 @@ const RoomList: FC<{ user: User; userProfile: UserProfile }> = ({ user, userProf
     setIsJoining(true);
     const roomRef = doc(db, 'rooms', room.id);
     try {
+      const newPlayer: Player = {
+        uid: user.uid,
+        displayName: userProfile.displayName,
+        tag: userProfile.tag,
+        isReady: false,
+        isMuted: true,
+        isSpeaking: false,
+        isLoaded: false,
+        status: 'connected',
+      };
       await runTransaction(db, async (transaction) => {
         const roomDoc = await transaction.get(roomRef);
         if (!roomDoc.exists()) throw new Error('Room does not exist!');
         const raw = roomDoc.data() as unknown as Partial<GameRoom> & Record<string, unknown>;
-        const rawPlayers = (raw as Record<string, unknown>).players as unknown;
-        const currentPlayers: Player[] = Array.isArray(rawPlayers)
-          ? (rawPlayers as Player[])
-          : rawPlayers && typeof rawPlayers === 'object'
-            ? (Object.values(rawPlayers as Record<string, Player>))
-            : [];
-        const roomData = { ...(raw as GameRoom), players: currentPlayers } as GameRoom;
-        if (roomData.players.length >= roomData.maxPlayers) throw new Error('Room is full!');
-        if (roomData.players.some((p) => p.uid === user.uid)) return;
-        const newPlayer: Player = {
-          uid: user.uid,
-          displayName: userProfile.displayName,
-          tag: userProfile.tag,
-          isReady: false,
-          isMuted: true,
-          isSpeaking: false,
-          isLoaded: false,
-          status: 'connected',
-        };
-        if (Array.isArray(rawPlayers)) {
-          transaction.update(roomRef, {
-            players: arrayUnion(newPlayer),
-            [`playerIds.${user.uid}`]: true,
-          });
-        } else {
-          transaction.update(roomRef, {
-            players: [...currentPlayers, newPlayer],
-            [`playerIds.${user.uid}`]: true,
-          });
-        }
+        const ids = Object.keys((raw.playerIds as Record<string, boolean> | undefined) || {});
+        if (ids.length >= (raw.maxPlayers as number)) throw new Error('Room is full!');
+        if (ids.includes(user.uid)) return;
+        // Only update playerIds in the room doc inside the transaction
+        transaction.update(roomRef, { [`playerIds.${user.uid}`]: true });
       });
+      // Create/merge player's subdoc outside the transaction
+      await setDoc(doc(roomRef, 'players', user.uid), newPlayer, { merge: true });
       router.push(`/room/${room.id}/lobby`);
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : String(error);
@@ -924,8 +966,14 @@ const RoomList: FC<{ user: User; userProfile: UserProfile }> = ({ user, userProf
                       <div><p className="font-semibold">{room.name}</p><p className="text-xs text-muted-foreground">Hosted by {room.host.displayName}</p></div>
                     </div>
                     <div className="flex items-center gap-4">
-                      <div className="flex items-center gap-2 text-sm text-muted-foreground"><UsersRound className="h-4 w-4" /><span>{room.players.length}/{room.maxPlayers}</span></div>
-                      <Button size="sm" variant="secondary" onClick={() => handleJoinClick(room)} disabled={isJoining || room.players.length >= room.maxPlayers}>Join</Button>
+                      {(() => { const count = Object.keys(room.playerIds || {}).length; return (
+                        <div className="flex items-center gap-2 text-sm text-muted-foreground"><UsersRound className="h-4 w-4" /><span>{count}/{room.maxPlayers}</span></div>
+                      ); })()}
+                      {(() => { const count = Object.keys(room.playerIds || {}).length; return (
+                        <Button size="sm" variant="secondary" onClick={() => handleJoinClick(room)} disabled={isJoining || count >= room.maxPlayers || (room.status && room.status !== 'waiting')}>
+                          {room.status && room.status !== 'waiting' ? 'In Game' : 'Join'}
+                        </Button>
+                      ); })()}
                     </div>
                   </div>
                 )) : !loadingRooms && (
@@ -1152,9 +1200,3 @@ export default function LobbyPage() {
     </div>
   );
 }
-
-
-
-
-
-

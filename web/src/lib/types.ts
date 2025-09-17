@@ -47,6 +47,11 @@ export interface GameRoom {
     chatMessages: ChatMessage[];
     createdAt: Timestamp;
     status: 'waiting' | 'loading' | 'playing' | 'finished';
+    settings?: {
+      turnCount?: number | null;
+      gobletsToWin?: number | null;
+      turnLengthSec?: number | null;
+    };
 }
 
 export interface FriendRequest {
