@@ -487,18 +487,40 @@ useEffect(() => {
     }, [remoteStreams]);
 
     useEffect(() => {
+        // Apply per-peer volume/mute to existing audio tags when controls change
+        remoteAudioElementsRef.current.forEach((el, uid) => {
+            try { el.muted = Boolean(peerMuted?.[uid]); } catch {}
+            try { const v = peerVolumes?.[uid]; if (typeof v === 'number') el.volume = Math.max(0, Math.min(1, v)); } catch {}
+        });
+    }, [peerVolumes, peerMuted]);
+
+    useEffect(() => {
         // Start signaling as soon as user is a member (do not wait for mic)
         const isMember = !!room?.playerIds && !!room.playerIds[user?.uid || ''];
         if (!user || !roomId || !room?.players || !isMember) return;
         const myId = user.uid;
         const roomRef = doc(db, "rooms", roomId);
         const signalingCollection = collection(roomRef, 'signaling');
-        const iceServers: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
-        if (process.env.NEXT_PUBLIC_TURN_URL) {
-          const urls = process.env.NEXT_PUBLIC_TURN_URL.split(',').map(s => s.trim()).filter(Boolean);
+        // Robust ICE servers: multiple STUNs + optional TURN (recommended)
+        const iceServers: RTCIceServer[] = [
+          { urls: [
+            'stun:stun.l.google.com:19302',
+            'stun:stun1.l.google.com:19302',
+            'stun:stun2.l.google.com:19302',
+            'stun:stun3.l.google.com:19302',
+            'stun:stun4.l.google.com:19302'
+          ] },
+        ];
+        const turnUrlsEnv = (process.env.NEXT_PUBLIC_TURN_URLS || process.env.NEXT_PUBLIC_TURN_URL || '').trim();
+        if (turnUrlsEnv) {
+          const urls = turnUrlsEnv.split(',').map(s => s.trim()).filter(Boolean);
           iceServers.push({ urls, username: process.env.NEXT_PUBLIC_TURN_USERNAME, credential: process.env.NEXT_PUBLIC_TURN_CREDENTIAL } as RTCIceServer);
         }
-        const pcConfig: RTCConfiguration = { iceServers };
+        const pcConfig: RTCConfiguration = {
+          iceServers,
+          // If you want guaranteed connectivity across strict NATs, set NEXT_PUBLIC_FORCE_TURN=1
+          iceTransportPolicy: process.env.NEXT_PUBLIC_FORCE_TURN ? 'relay' : 'all',
+        };
         const localPeerConnections = { ...peerConnectionsRef.current };
         const createPeerConnection = (peerId: string, initiator: boolean) => {
             if (localPeerConnections[peerId]) return localPeerConnections[peerId];
@@ -610,6 +632,19 @@ useEffect(() => {
                         }
                     } catch {}
                 }
+            };
+            pc.onconnectionstatechange = async () => {
+              const st = pc.connectionState as RTCPeerConnectionState;
+              if ((st === 'failed' || st === 'disconnected') && initiator) {
+                try {
+                  if (pc.signalingState === 'stable') {
+                    await pc.setLocalDescription(await pc.createOffer({ iceRestart: true }));
+                    await addDoc(signalingCollection, { from: myId, to: peerId, signal: { type: 'offer', sdp: pc.localDescription?.sdp } });
+                  } else {
+                    try { pc.restartIce?.(); } catch {}
+                  }
+                } catch {}
+              }
             };
             // Negotiation: only the chosen initiator proactively creates offers to reduce glare
             if (initiator) {
@@ -910,14 +945,15 @@ useEffect(() => {
                     data-peer-audio
                     autoPlay
                     playsInline
-                    // ensure not muted and try to play on canplay for autoplay policies
-                    muted={false}
+                    // ensure not muted by default; we apply local mute/volume below
+                    muted={Boolean(peerMuted?.[uid])}
                     ref={audioEl => {
                      if (!audioEl) return;
                      remoteAudioElementsRef.current.set(uid, audioEl);
                      if (audioEl.srcObject !== stream) {
                        audioEl.srcObject = stream;
                      }
+                      try { audioEl.volume = Math.max(0, Math.min(1, (peerVolumes?.[uid] ?? 1))); } catch {}
                       audioEl.play?.().catch(() => {});
                     }}
                      onCanPlay={e => { try { (e.currentTarget as HTMLAudioElement).play(); } catch {} }}
